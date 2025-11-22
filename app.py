@@ -78,21 +78,6 @@ st.markdown(
             color: {DCF_COLORS["text_body"]};
         }}
 
-        /* EXCEPCIÓN: iconos de Streamlit (Material Icons) */
-        .material-icons {{
-            font-family: 'Material Icons' !important;
-            font-weight: normal !important;
-            font-style: normal !important;
-            font-size: 24px !important;
-            line-height: 1 !important;
-            letter-spacing: normal !important;
-            text-transform: none !important;
-            display: inline-block;
-            white-space: nowrap;
-            word-wrap: normal;
-            direction: ltr;
-        }}
-
         /* Header DCF */
         .dcf-header {{
             background-color: rgba(5,61,87,0.25);
@@ -130,6 +115,25 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# FIX definitivo para los iconos (después del bloque anterior)
+st.markdown("""
+<style>
+span[class*="material-icons"] {
+    font-family: 'Material Icons' !important;
+    font-weight: normal !important;
+    font-style: normal !important;
+    font-size: 24px !important;
+    line-height: 1 !important;
+    letter-spacing: normal !important;
+    text-transform: none !important;
+    display: inline-block;
+    white-space: nowrap;
+    direction: ltr;
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 # Header con logo (el fondo negro general se mantiene)
 logo_base64 = load_logo_base64("dcf_logo.png")
