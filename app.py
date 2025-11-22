@@ -72,8 +72,9 @@ DCF_PLOTLY_TEMPLATE = go.layout.Template(
 st.markdown(
     f"""
     <style>
-        /* Fuente general y color de texto */
-        html, body, [data-testid="stAppViewContainer"] * {{
+        /* Fuente general y color de texto
+           👉 OJO: sin el * para no pisar los iconos de Streamlit */
+        html, body, [data-testid="stAppViewContainer"] {{
             font-family: "Montserrat", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             color: {DCF_COLORS["text_body"]};
         }}
@@ -115,25 +116,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-# 👇 Segundo bloque SOLO para arreglar el icono del header
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/icon?family=Material+Icons');
-
-    .material-icons,
-    [class^="material-icons"],
-    span[class*="material-icons"] {
-        font-family: 'Material Icons' !important;
-        font-weight: normal !important;
-        font-style: normal !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 
 
 # Header con logo (el fondo negro general se mantiene)
