@@ -4,7 +4,6 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from plotly import figure_factory as ff
-import plotly.graph_objects as go
 import base64
 import os
 
@@ -111,46 +110,15 @@ st.markdown(
         tbody tr:nth-child(even) {{
             background-color: #0D0D0D !important;
         }}
+
+        /* Ocultar header nativo de Streamlit (ícono + texto) */
+        header[data-testid="stHeader"] {{
+            display: none !important;
+        }}
     </style>
     """,
     unsafe_allow_html=True,
 )
-
-st.markdown("""
-<style>
-
-/* --- FIX ABSOLUTO PARA REMOVER EL TEXTO "keyboard_double_arrow_right" --- */
-
-/* 1) Forzar que Streamlit use siempre Material Icons */
-@import url('https://fonts.googleapis.com/icon?family=Material+Icons');
-
-.material-icons, [class^="material-icons"], span[class*="material-icons"] {
-    font-family: 'Material Icons' !important;
-    font-weight: normal !important;
-    font-style: normal !important;
-    font-size: 24px !important;
-    line-height: 1 !important;
-    text-transform: none !important;
-    letter-spacing: normal !important;
-    display: inline-block !important;
-    white-space: nowrap !important;
-    direction: ltr !important;
-}
-
-/* 2) Prevención adicional: ocultar cualquier fallback textual */
-span[data-baseweb="icon"] {
-    font-family: 'Material Icons' !important;
-}
-
-/* 3) Forzar reemplazo específico si Streamlit renderiza texto en vez del icono */
-span:contains("keyboard_double_arrow_right") {
-    font-family: 'Material Icons' !important;
-    visibility: hidden !important; /* opción 1 */
-}
-</style>
-""", unsafe_allow_html=True)
-
-
 
 # Header con logo (el fondo negro general se mantiene)
 logo_base64 = load_logo_base64("dcf_logo.png")
