@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 BASE_DIR = Path(__file__).resolve().parent
 
 # Ruta al Excel, relativa al módulo
-XLSX_PATH = BASE_DIR / "data" / "Letras_Activas.xlsx"
+XLSX_PATH = BASE_DIR / "data" / "Letras Activas.xlsx"
 
 # Cache también relativa al módulo (no al cwd)
 CACHE_DIR = BASE_DIR / ".cache_data912"
