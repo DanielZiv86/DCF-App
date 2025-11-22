@@ -1,6 +1,30 @@
+# Bytecode de Python
 __pycache__/
-*.pyc
-.cache*/
-desktop.ini
+*.py[cod]
+*.pyo
+*.pyd
+
+# Entornos virtuales
 .env
+.venv/
+venv/
+env/
+
+# Cache de datos local
+.cache_data912/
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Config/estado de Streamlit
+.streamlit/
+
+# IDEs
 .vscode/
+.idea/
+
+# Datos locales (opcional)
+data/*.tmp
+*.log

@@ -12,8 +12,15 @@ from matplotlib import ticker as mtick
 import plotly.graph_objects as go
 
 # ===================== 0) Config =====================
-XLSX_PATH = Path("Letras Activas.xlsx")
-CACHE_DIR = Path("./.cache_data912")
+
+# Base del módulo (carpeta donde está este .py)
+BASE_DIR = Path(__file__).resolve().parent
+
+# Ruta al Excel, relativa al módulo
+XLSX_PATH = BASE_DIR / "data" / "Letras_Activas.xlsx"
+
+# Cache también relativa al módulo (no al cwd)
+CACHE_DIR = BASE_DIR / ".cache_data912"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 URL_MEP   = "https://dolarapi.com/v1/dolares/bolsa"
