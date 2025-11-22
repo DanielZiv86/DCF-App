@@ -116,23 +116,40 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# FIX definitivo para los iconos (después del bloque anterior)
 st.markdown("""
 <style>
-span[class*="material-icons"] {
+
+/* --- FIX ABSOLUTO PARA REMOVER EL TEXTO "keyboard_double_arrow_right" --- */
+
+/* 1) Forzar que Streamlit use siempre Material Icons */
+@import url('https://fonts.googleapis.com/icon?family=Material+Icons');
+
+.material-icons, [class^="material-icons"], span[class*="material-icons"] {
     font-family: 'Material Icons' !important;
     font-weight: normal !important;
     font-style: normal !important;
     font-size: 24px !important;
     line-height: 1 !important;
-    letter-spacing: normal !important;
     text-transform: none !important;
-    display: inline-block;
-    white-space: nowrap;
-    direction: ltr;
+    letter-spacing: normal !important;
+    display: inline-block !important;
+    white-space: nowrap !important;
+    direction: ltr !important;
+}
+
+/* 2) Prevención adicional: ocultar cualquier fallback textual */
+span[data-baseweb="icon"] {
+    font-family: 'Material Icons' !important;
+}
+
+/* 3) Forzar reemplazo específico si Streamlit renderiza texto en vez del icono */
+span:contains("keyboard_double_arrow_right") {
+    font-family: 'Material Icons' !important;
+    visibility: hidden !important; /* opción 1 */
 }
 </style>
 """, unsafe_allow_html=True)
+
 
 
 # Header con logo (el fondo negro general se mantiene)
