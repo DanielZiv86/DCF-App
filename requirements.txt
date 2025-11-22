@@ -6,3 +6,4 @@ lxml
 numpy
 plotly
 matplotlib
+openpyxl
