@@ -78,6 +78,21 @@ st.markdown(
             color: {DCF_COLORS["text_body"]};
         }}
 
+        /* EXCEPCIÓN: iconos de Streamlit (Material Icons) */
+        .material-icons {{
+            font-family: 'Material Icons' !important;
+            font-weight: normal !important;
+            font-style: normal !important;
+            font-size: 24px !important;
+            line-height: 1 !important;
+            letter-spacing: normal !important;
+            text-transform: none !important;
+            display: inline-block;
+            white-space: nowrap;
+            word-wrap: normal;
+            direction: ltr;
+        }}
+
         /* Header DCF */
         .dcf-header {{
             background-color: rgba(5,61,87,0.25);
