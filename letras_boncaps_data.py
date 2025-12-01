@@ -13,13 +13,13 @@ import plotly.graph_objects as go
 
 # ===================== 0) Config =====================
 
-# Base del módulo (carpeta donde está este .py)
+# Carpeta donde está este archivo .py
 BASE_DIR = Path(__file__).resolve().parent
 
-# Ruta al Excel, relativa al módulo
+# Ruta fija al Excel (tal como está en tu disco)
 XLSX_PATH = BASE_DIR / "data" / "Letras Activas.xlsx"
 
-# Cache también relativa al módulo (no al cwd)
+# Cache relativa al módulo
 CACHE_DIR = BASE_DIR / ".cache_data912"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -41,6 +41,82 @@ DCF_COLORS = {
     "accent":     "#0E6881",
     "muted":      "#90B0BC",
 }
+
+# ===================== Google Sheet BONOS / LETRAS =====================
+
+GOOGLE_SHEET_ID = "1AJKhrMq_lDHRRbGQ5UNkIJSmkPsBi3ekFkVODjIarIg"
+
+def _sheet_csv_url(sheet_name: str) -> str:
+    """
+    Devuelve la URL CSV pública para una hoja de Google Sheets.
+    """
+    return (
+        f"https://docs.google.com/spreadsheets/d/"
+        f"{GOOGLE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+    )
+
+
+def load_bonos_letras_prices() -> pd.DataFrame:
+    """
+    Lee las hojas BONOS y LETRAS del Google Sheet y devuelve
+    un DataFrame indexado por Ticker con la última cotización (columna Last).
+
+    Output: DataFrame con índice = Ticker y columna 'Last' (float).
+    """
+    sheets = ["BONOS", "LETRAS"]
+    frames = []
+
+    for sheet in sheets:
+        url = _sheet_csv_url(sheet)
+        try:
+            df_raw = pd.read_csv(url)
+        except Exception as e:
+            print(f"⚠️ No pude leer la hoja {sheet} desde Google Sheets: {e}")
+            continue
+
+        if df_raw.empty:
+            continue
+
+        # Suponemos que la primera columna es el ticker
+        first_col = df_raw.columns[0]
+        df = df_raw.copy()
+        df = df[df[first_col].notna()]  # saco filas vacías
+        df = df.rename(columns={first_col: "Ticker"})
+
+        # En este dataset de Rudolph, la estructura típica es:
+        # Ticker | Bid Size | Bid | Ask | Ask Size | Last | Close | ...
+        # => tomamos la 6ta columna (índice 5) como precio 'Last'
+        if df.shape[1] <= 5:
+            print(f"⚠️ La hoja {sheet} no tiene suficientes columnas para extraer precio.")
+            continue
+
+        price_col = df.columns[5]  # columna Last
+        df = df[["Ticker", price_col]].rename(columns={price_col: "Last"})
+
+        df["Ticker"] = df["Ticker"].astype(str).str.strip()
+
+        # Números tipo 113,890.00  ->  113890.00
+        df["Last"] = (
+            df["Last"]
+            .astype(str)
+            .str.replace(",", "", regex=False)  # saco separador de miles
+        )
+        df["Last"] = pd.to_numeric(df["Last"], errors="coerce")
+
+        df = df.dropna(subset=["Last"])
+        frames.append(df)
+
+    if not frames:
+        raise RuntimeError(
+            "No pude cargar ninguna hoja de BONOS/LETRAS desde Google Sheets."
+        )
+
+    all_df = pd.concat(frames, ignore_index=True)
+    # Si el mismo ticker aparece en varias hojas, me quedo con la primera
+    all_df = all_df.drop_duplicates(subset=["Ticker"], keep="first")
+
+    return all_df.set_index("Ticker")
+
 
 # ===================== Utils HTTP con retry + cache =====================
 def build_session(retries:int = RETRIES, backoff:float = BACKOFF) -> requests.Session:
@@ -84,12 +160,21 @@ def get_letras_carry(
       - carry_view: tabla resumen para mostrar (Ticker, Precio, Días, TNA, TEA, TEM, MEP BE, Banda Sup)
       - carry: dataframe completo con columnas para el gráfico (days_to_exp, finish_worst, finish_better, MEP_BREAKEVEN)
       - mep: tipo de cambio MEP utilizado
+
+    Los precios de mercado vienen del Google Sheet (hojas BONOS y LETRAS).
+    El Excel local define: Ticker, Fecha Vencimiento, Valor Final (payoff).
     """
     xlsx_path = Path(xlsx_path)
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) Cargar Excel
+    if not xlsx_path.exists():
+        raise FileNotFoundError(
+            f"No se encontró el archivo de Letras.\n"
+            f"Ruta esperada: {xlsx_path}"
+        )
+
+    # 1) Cargar Excel de letras activas
     df_xls = pd.read_excel(
         xlsx_path,
         usecols=["Ticker", "Fecha Vencimiento", "Valor Final"],
@@ -97,7 +182,9 @@ def get_letras_carry(
     )
     df_xls.columns = [c.strip() for c in df_xls.columns]
     df_xls["Ticker"] = df_xls["Ticker"].astype(str).str.strip()
-    df_xls["Fecha Vencimiento"] = pd.to_datetime(df_xls["Fecha Vencimiento"], dayfirst=True, errors="coerce")
+    df_xls["Fecha Vencimiento"] = pd.to_datetime(
+        df_xls["Fecha Vencimiento"], dayfirst=True, errors="coerce"
+    )
     df_xls["Valor Final"] = pd.to_numeric(df_xls["Valor Final"], errors="coerce")
 
     df_xls = df_xls.dropna(subset=["Ticker", "Fecha Vencimiento", "Valor Final"])
@@ -109,56 +196,54 @@ def get_letras_carry(
     tickers = dict(zip(df_xls["Ticker"], df_xls["Fecha Vencimiento"].dt.date))
     payoff  = dict(zip(df_xls["Ticker"], df_xls["Valor Final"].astype(float)))
 
-    # 2) Datos de mercado
-    session = build_session()
+    # 2) Traer precios desde Google Sheets (BONOS + LETRAS)
+    prices_df = load_bonos_letras_prices()   # índice = Ticker, col = Last
 
-    # MEP
+    # Armo dataframe base 'carry' indexado por ticker
+    carry = pd.DataFrame(index=sorted(tickers.keys()))
+    carry.index.name = "symbol"
+
+    carry["bond_price"] = prices_df["Last"].reindex(carry.index)
+
+    # Aviso si algún ticker del Excel no tiene precio en el Sheet
+    missing_px = carry["bond_price"].isna()
+    if missing_px.any():
+        faltan = carry.index[missing_px].tolist()
+        print("⚠️ Tickers sin precio en Google Sheets:", faltan)
+
+    carry["payoff"] = pd.Series(payoff)
+    carry["expiration"] = pd.to_datetime(
+        pd.Series(tickers, name="expiration")
+    )
+
+    # 3) Tipo de cambio MEP (igual que antes)
+    session = build_session()
     resp = session.get(URL_MEP, timeout=TIMEOUT_S)
     resp.raise_for_status()
     mep = float(resp.json()["venta"])
 
-    # Data912 (con cache)
-    notes, src_notes = fetch_json_with_cache(session, URL_NOTES, cache_dir / "arg_notes.json", timeout=TIMEOUT_S)
-    bonds, src_bonds = fetch_json_with_cache(session, URL_BONDS, cache_dir / "arg_bonds.json", timeout=TIMEOUT_S)
-
-    if src_notes == "cache" or src_bonds == "cache":
-        print("ℹ️  Fuente data912 parcial/totalmente desde cache (servicio lento o intermitente).")
-
-    df = pd.DataFrame(notes + bonds)
-
-    # 3) Cartera filtrada
-    carry = df.loc[df.symbol.isin(tickers.keys())].copy().set_index("symbol")
-
-    for col in ("c", "px_bid", "px_ask"):
-        if col not in carry.columns:
-            carry[col] = pd.NA
-
-    px_c   = pd.to_numeric(carry["c"], errors="coerce")
-    px_bid = pd.to_numeric(carry["px_bid"], errors="coerce")
-    px_ask = pd.to_numeric(carry["px_ask"], errors="coerce")
-
-    carry["bond_price"] = px_c.round(2)
-    carry["payoff"]     = carry.index.map(payoff)
-    carry["expiration"] = carry.index.map(tickers)
-
+    # 4) Días al vencimiento
     today = date.today()
-    carry["days_to_exp"] = (pd.to_datetime(carry["expiration"]) - pd.Timestamp(today)).dt.days.clip(lower=0)
+    carry["days_to_exp"] = (
+        (carry["expiration"] - pd.Timestamp(today)).dt.days.clip(lower=0)
+    )
 
-    # 4) Tasas
+    # 5) Tasas (TNA / TEA / TEM) en base a bond_price y payoff
     valid_days = carry["days_to_exp"].astype("float")
     valid_days = valid_days.mask(valid_days <= 0, np.nan)
+
+    px_c = pd.to_numeric(carry["bond_price"], errors="coerce")
 
     ratio_c = carry["payoff"] / px_c
     carry["tna"] = ((ratio_c - 1) / valid_days * 365).replace([np.inf, -np.inf], np.nan)
     carry["tea"] = (ratio_c ** (365 / valid_days) - 1).replace([np.inf, -np.inf], np.nan)
     carry["tem"] = (ratio_c ** (1 / (valid_days / 30)) - 1).replace([np.inf, -np.inf], np.nan)
 
-    carry["tem_bid"] = (carry["payoff"] / px_bid) ** (1 / (valid_days / 30)) - 1
-    carry["tem_ask"] = (carry["payoff"] / px_ask) ** (1 / (valid_days / 30)) - 1
-
-    # 5) Banda MLC continua
+    # 6) Banda MLC continua (igual que antes)
     ANCHOR = date(2025, 4, 11)
-    days_since_anchor = (pd.to_datetime(carry["expiration"]) - pd.Timestamp(ANCHOR)).dt.days.clip(lower=0)
+    days_since_anchor = (
+        (carry["expiration"] - pd.Timestamp(ANCHOR)).dt.days.clip(lower=0)
+    )
     months_cont = days_since_anchor / 30.0
 
     finish_worst_float  = 1400 * (1.01 ** months_cont)  # techo
@@ -167,18 +252,19 @@ def get_letras_carry(
     carry["finish_worst"]  = finish_worst_float.round().astype("Int64")
     carry["finish_better"] = finish_better_float.round().astype("Int64")
 
-    # 5.b) Carry en escenarios de tipo de cambio MEP
+    # 7) Carry en escenarios de tipo de cambio MEP (usando px_c)
     for price in [1000, 1100, 1200, 1300, 1400]:
         carry[f"carry_{price}"] = (carry["payoff"] / px_c) * (mep / price) - 1
 
     carry["carry_worst"] = (carry["payoff"] / px_c) * (mep / finish_worst_float) - 1
 
-    # 6) MEP Breakeven
+    # 8) MEP Breakeven
     carry["MEP_BREAKEVEN"] = (mep * (carry["payoff"] / px_c)).round(0)
 
     # Ordenar por días
     carry = carry.sort_values("days_to_exp")
-    # 7) Vista de tabla para mostrar
+
+    # 9) Vista resumida para la tabla de Streamlit
     ordered_cols = [
         "symbol",         # -> Ticker
         "bond_price",     # -> Precio

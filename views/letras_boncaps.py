@@ -9,7 +9,7 @@ from letras_boncaps_data import get_letras_carry
 from app_theme import DCF_PLOTLY_TEMPLATE
 
 
-@st.cache_data(ttl=300)
+#@st.cache_data(ttl=300)
 def load_letras_v2():
     """Carga tabla y datos crudos de Letras/Boncaps (nueva versión)."""
     return get_letras_carry()
