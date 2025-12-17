@@ -16,56 +16,80 @@ def load_all_bonds() -> pd.DataFrame:
 
 def build_curve_figure(df: pd.DataFrame, mercado: str) -> go.Figure:
     df = df.dropna(subset=["Duration", "TIR"])
-    df = df[df["Duration"] > 0]
+    df = df[df["Duration"] > 0].copy()
 
-    x = df["Duration"].values.astype(float)
-    y = df["TIR"].values.astype(float)
-    tickers = df["Ticker"].values
+    # --- Clasificación Ley (heurística por prefijo) ---
+    # Globales (Ley NY): GDxx
+    # Bonares (Ley AR):  ALxx / AExx
+    def classify_law(ticker: str) -> str:
+        t = str(ticker).strip().upper()
+        if t.startswith("GD"):
+            return "Globales (Ley NY)"
+        if t.startswith("AL") or t.startswith("AE") or t.startswith("AN"):
+            return "Bonares (Ley AR)"
+        return "Otros"
+
+    df["Ley"] = df["Ticker"].map(classify_law)
 
     fig = go.Figure()
 
-    # Puntos: hover = Ticker + TIR
-    fig.add_trace(go.Scatter(
-        x=x,
-        y=y,
-        mode="markers+text",
-        text=tickers,
-        textposition="top center",
-        name="Bonos",
-        marker=dict(size=9),
-        hovertemplate="<b>%{text}</b><br>TIR: %{y:.2%}<extra></extra>",
-    ))
+    def add_group(group_df: pd.DataFrame, name: str):
+        if group_df.empty:
+            return
 
-    # Línea de tendencia log
-    mask = np.isfinite(x) & np.isfinite(y) & (x > 0)
-    if mask.sum() >= 2:
-        X = np.log(x[mask])
-        b, a = np.polyfit(X, y[mask], 1)
-        xs = np.linspace(x.min(), x.max(), 200)
-        ys = a + b * np.log(xs)
+        x = group_df["Duration"].astype(float).values
+        y = group_df["TIR"].astype(float).values
+        tickers = group_df["Ticker"].astype(str).values
 
+        # Puntos del grupo (mismo color por ser un solo trace)
         fig.add_trace(go.Scatter(
-            x=xs,
-            y=ys,
-            mode="lines",
-            line=dict(dash="dash"),
-            name="Tendencia (log)",
-            hovertemplate="Tendencia (log)<br>TIR: %{y:.2%}<extra></extra>",
+            x=x,
+            y=y,
+            mode="markers+text",
+            text=tickers,
+            textposition="top center",
+            name=name,
+            marker=dict(size=9),
+            hovertemplate="<b>%{text}</b><br>Duration: %{x:.2f}<br>TIR: %{y:.2%}<extra></extra>",
         ))
 
+        # Tendencia log del grupo: y = a + b*ln(x)
+        mask = np.isfinite(x) & np.isfinite(y) & (x > 0)
+        if mask.sum() >= 2:
+            X = np.log(x[mask])
+            b, a = np.polyfit(X, y[mask], 1)
+
+            xs = np.linspace(np.nanmin(x[mask]), np.nanmax(x[mask]), 200)
+            ys = a + b * np.log(xs)
+
+            fig.add_trace(go.Scatter(
+                x=xs,
+                y=ys,
+                mode="lines",
+                line=dict(dash="dash"),
+                name=f"Tendencia (log) – {name}",
+                hovertemplate=f"Tendencia (log) – {name}<br>TIR: %{{y:.2%}}<extra></extra>",
+            ))
+
+    # 2 grupos principales
+    add_group(df[df["Ley"] == "Globales (Ley NY)"], "Globales (Ley NY)")
+    add_group(df[df["Ley"] == "Bonares (Ley AR)"], "Bonares (Ley AR)")
+
+    # Opcional: si querés mostrar “Otros” (BOPREAL, etc.), descomentá:
+    # add_group(df[df["Ley"] == "Otros"], "Otros")
+
     fig.update_layout(
-        title=f"CURVA TIR SOBERANOS HD – {mercado}",
+        title=dict(text=""),
         xaxis_title="Duration (años)",
-        yaxis_title="TIR (%)",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom", y=1.02,
-            xanchor="center", x=0.5,
-        ),
+        yaxis_title="TIR",
         template=DCF_PLOTLY_TEMPLATE,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(l=20, r=20, t=70, b=20),
     )
+
     fig.update_yaxes(tickformat=".2%")
     return fig
+
 
 
 def render_bonos_hd():

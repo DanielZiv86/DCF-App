@@ -1,15 +1,77 @@
 # bonistas_hd_data.py
-# ========= Scraper bonistas -> multi cotización (Pesos / MEP / CCL) =========
+# ========= Bonos HD (Hard Dollar) - Cálculo robusto sin webscraping de bonistas =========
+#
+# Fuente de precios: IOL (pd.read_html) -> filtra tickers base / D / C
+# Fuente de cashflows: Excel (BD BONOS HD.xlsx) con flujos futuros en USD
+#
+# Devuelve una tabla multi-mercado compatible con la vista `views/bonos_hd.py`:
+#   Base, Ticker, Mercado, Precio, Duration, TIR
+#
+# Notas:
+# - Para bonos HD, los cashflows suelen estar en USD. Por eso, la TIR se calcula sobre un "precio USD".
+# - MEP: usa el ticker con sufijo 'D' (ej. AL30D)
+# - CCL: usa el ticker con sufijo 'C' (ej. AL30C)
+# - PESOS: para evitar inconsistencias de moneda, se devuelve el mismo precio USD que MEP
+#   (si querés una curva “en pesos”, habría que modelar FX implícito y/o cashflows en ARS).
+#
+from __future__ import annotations
+
 import re
+from dataclasses import dataclass
 from datetime import date
+from typing import Iterable
 
+import numpy as np
 import pandas as pd
+
+# pd.read_html depende de lxml/html5lib; en la mayoría de entornos Streamlit ya está disponible.
+# Si no, instalá: pip install lxml html5lib
 import requests
-from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter, Retry
+from scipy.optimize import brentq
+try:
+    import yfinance as yf
+except Exception:
+    yf = None
 
 
-# ----------------------- Helpers scraping -----------------------
+# =========================
+# Config
+# =========================
+
+# ⚠️ Ajustá si tu archivo está en otra ruta
+DEFAULT_BD_PATH = "data/BD BONOS HD.xlsx"
+
+# Tabla pública de IOL con bonos; se parsea con pd.read_html y se filtra por ticker
+URL_IOL_BONOS = "https://iol.invertironline.com/mercado/cotizaciones/argentina/bonos/todos"
+
+def get_base_tickers_from_bd(path: str = DEFAULT_BD_PATH) -> list[str]:
+    """
+    Devuelve la lista de tickers base (SIN sufijos D/C) a partir de la BD.
+    """
+    df = load_cashflows(path)
+    tickers = (
+        df["Ticker"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .unique()
+        .tolist()
+    )
+    tickers = sorted([t for t in tickers if t])  # limpia vacíos
+    return tickers
+
+
+MERCADOS = [
+    ("PESOS", ""),   # AL30
+    ("MEP", "D"),    # AL30D
+    ("CCL", "C"),    # AL30C
+]
+
+
+# =========================
+# Requests session
+# =========================
 
 def _session() -> requests.Session:
     s = requests.Session()
@@ -23,197 +85,414 @@ def _session() -> requests.Session:
     return s
 
 
-def _to_float(s: str | None) -> float | None:
-    """Normaliza números tipo 1.234,56% o 10,5 a float."""
-    if s is None:
-        return None
-    s = str(s).strip().lstrip("=+ ")
-    # normaliza 1.234,56 -> 1234.56 si aplica
-    if re.search(r"\d,\d{2}%?$", s):
-        s = s.replace(".", "").replace(",", ".")
-    # deja sólo dígitos, signo, punto y %
-    s = re.sub(r"[^0-9\.\-%]", "", s)
+# =========================
+# Carga de cashflows
+# =========================
+
+REQUIRED_CF_COLS = ["Ticker", "Fecha", "Principal", "Int", "Cashflow"]
+
+def load_cashflows(path: str = DEFAULT_BD_PATH) -> pd.DataFrame:
+    """
+    Lee un Excel con cashflows por bono.
+
+    Columnas requeridas:
+      - Ticker: ej 'AL30' (SIN sufijo D/C)
+      - Fecha: fecha del flujo
+      - Principal, Int, Cashflow: numéricos (Cashflow puede ser Principal+Int)
+    """
+    df = pd.read_excel(path)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    missing = [c for c in REQUIRED_CF_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Faltan columnas en BD: {missing}. Tengo: {df.columns.tolist()}")
+
+    df["Ticker"] = df["Ticker"].astype(str).str.strip().str.upper()
+    df["Fecha"] = pd.to_datetime(df["Fecha"], dayfirst=True, errors="coerce")
+
+    for col in ["Principal", "Int", "Cashflow"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    # limpia filas sin fecha
+    df = df.dropna(subset=["Fecha"]).copy()
+    return df
+
+
+# =========================
+# Precios desde IOL
+# =========================
+
+def _parse_price_to_float(x) -> float:
+    if pd.isna(x):
+        return np.nan
+    s = str(x).strip()
+    if s in {"", "-", "–"}:
+        return np.nan
+    s = re.sub(r"[^\d\.,-]", "", s)
     if not s:
-        return None
+        return np.nan
+
+    # Caso "1.234,56" o "1,234.56"
+    if "." in s and "," in s:
+        if s.rfind(".") > s.rfind(","):
+            s = s.replace(",", "")
+        else:
+            s = s.replace(".", "").replace(",", ".")
+    else:
+        # Sólo coma: asumimos decimal
+        if "," in s and "." not in s:
+            s = s.replace(".", "").replace(",", ".")
+
     try:
-        return float(s[:-1]) / 100.0 if s.endswith("%") else float(s)
+        return float(s)
     except Exception:
-        return None
+        return np.nan
 
 
-def _find_metric(soup: BeautifulSoup, label: str) -> float | None:
+def fetch_iol_bonds_prices(url: str, tickers: Iterable[str], timeout_s: int = 20) -> pd.DataFrame:
     """
-    Busca en el HTML el texto 'label' (ej. 'Precio', 'TIR')
-    y devuelve el número que está al lado.
+    Devuelve una tabla con precios por ticker (columna 'Price').
+
+    - Usa pd.read_html sobre la página de IOL.
+    - Intenta detectar columnas de ticker y último/precio.
+    - Normaliza precios y filtra por tickers de interés.
     """
-    lbl = label.lower().strip()
-
-    # 1) Buscar el nodo de texto exacto y leer el siguiente
-    for node in soup.find_all(string=True):
-        if node.strip().lower() == lbl:
-            # hermano siguiente en la misma fila / div
-            sib = node.parent.find_next_sibling()
-            if sib and sib.get_text(strip=True):
-                v = _to_float(sib.get_text(strip=True))
-                if v is not None:
-                    return v
-            # o el siguiente texto en el flujo
-            nxt = node.find_next(string=True)
-            if nxt and nxt.strip() and nxt != node:
-                v = _to_float(nxt.strip())
-                if v is not None:
-                    return v
-
-    # 2) Fallback por regex sobre todo el texto de la página
-    m = re.search(
-        rf"{re.escape(label)}\s*([=+\-\d\.,%]+)",
-        soup.get_text(" ", strip=True),
-        flags=re.I,
-    )
-    return _to_float(m.group(1)) if m else None
-
-
-def scrape_bonistas_metrics(ticker: str, timeout: int = 12) -> dict:
-    """
-    Devuelve un dict con:
-      { 'Ticker': tk, 'Precio': float | None, 'TIR': float | None }
-    """
-    url = f"https://bonistas.com/bono-cotizacion-rendimiento-precio-hoy/{ticker}"
     s = _session()
-    r = s.get(url, timeout=timeout)
+    r = s.get(url, timeout=timeout_s)
     r.raise_for_status()
-    soup = BeautifulSoup(r.text, "lxml")
-    return {
-        "Ticker": ticker,
-        "Precio": _find_metric(soup, "Precio"),
-        "TIR": _find_metric(soup, "TIR"),
-    }
+
+    tables = pd.read_html(r.text)
+    if not tables:
+        raise RuntimeError("No pude leer tablas con pd.read_html desde IOL.")
+
+    df = tables[0].copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Heurística de columnas
+    ticker_col = next((c for c in df.columns if c.lower() in {"símbolo", "simbolo", "ticker", "especie"}), df.columns[0])
+    price_col  = next((c for c in df.columns if c.lower() in {"último", "ultimo", "últ.", "ult.", "precio", "cierre"}), df.columns[1])
+
+    out = df[[ticker_col, price_col]].rename(columns={ticker_col: "Ticker", price_col: "PriceRaw"}).copy()
+    out["Ticker"] = out["Ticker"].astype(str).str.strip().str.upper()
+
+    tickers_set = {str(t).strip().upper() for t in tickers}
+    out = out[out["Ticker"].isin(tickers_set)].copy()
+
+    out["Price"] = out["PriceRaw"].apply(_parse_price_to_float)
+
+    # Muchos precios de bonos vienen en "cents" (ej 3.456 -> 34.56). Regla práctica:
+    # si es muy grande, dividir por 100.
+    out["Price"] = np.where(out["Price"] > 500, out["Price"] / 100.0, out["Price"])
+    out = out.dropna(subset=["Price"]).drop_duplicates(subset=["Ticker"], keep="last")
+
+    return out[["Ticker", "Price"]].sort_values("Ticker").reset_index(drop=True)
+
+def _to_yf_ticker(tk: str) -> str:
+    tk = str(tk).strip().upper()
+    return tk if tk.endswith(".BA") else f"{tk}.BA"
 
 
-# ----------------------- Duration desde el ticker -----------------------
-
-def _maturity_from_ticker(tk: str) -> date | None:
+def fetch_yf_prices(tickers: Iterable[str], period: str = "5d") -> pd.DataFrame:
     """
-    Extrae YY del ticker (…YY, …YYD o …YYC) y devuelve 09/07/20YY.
-    Ej: AL30, AL30D o AL30C -> 09/07/2030
+    Devuelve DataFrame: Ticker, Price
+    Usa yfinance. Si no está instalado, devuelve vacío.
     """
-    tk = tk.upper()
-    # últimos dos dígitos de año + opcional D/C al final
-    m = re.search(r"(\d{2})([DC])?$", tk)
-    if not m:
-        return None
-    yy = int(m.group(1))
-    year = 2000 + yy
-    return date(year, 7, 9)
+    if yf is None:
+        return pd.DataFrame(columns=["Ticker", "Price"])
+
+    tickers = [str(t).strip().upper() for t in tickers if str(t).strip()]
+    if not tickers:
+        return pd.DataFrame(columns=["Ticker", "Price"])
+
+    yf_tickers = [_to_yf_ticker(t) for t in tickers]
+
+    # Descarga conjunta (más eficiente)
+    data = yf.download(
+        yf_tickers,
+        period=period,
+        interval="1d",
+        auto_adjust=False,
+        group_by="ticker",
+        progress=False,
+        threads=True,
+    )
+
+    rows = []
+    for base_tk, yf_tk in zip(tickers, yf_tickers):
+        try:
+            if isinstance(data.columns, pd.MultiIndex):
+                # MultiIndex: (field, ticker) o (ticker, field) depende; probamos ambos
+                if ("Close", yf_tk) in data.columns:
+                    close = data[("Close", yf_tk)].dropna()
+                elif (yf_tk, "Close") in data.columns:
+                    close = data[(yf_tk, "Close")].dropna()
+                else:
+                    close = pd.Series(dtype=float)
+            else:
+                # Un solo ticker
+                close = data["Close"].dropna() if "Close" in data.columns else pd.Series(dtype=float)
+
+            px = float(close.iloc[-1]) if len(close) else np.nan
+        except Exception:
+            px = np.nan
+
+        # Normalización estilo IOL (bonos a veces vienen “*100”)
+        if not np.isnan(px) and px > 500:
+            px = px / 100.0
+
+        rows.append({"Ticker": base_tk, "Price": px})
+
+    out = pd.DataFrame(rows)
+    out = out.dropna(subset=["Price"])
+    return out
 
 
-def _duration_years_from_ticker(tk: str, today: date | None = None) -> float | None:
-    if today is None:
-        today = date.today()
-    mat = _maturity_from_ticker(tk)
-    if not mat:
-        return None
-    days = (mat - today).days
-    if days < 0:
-        days = 0
-    return round(days / 365.0, 1)
+
+# =========================
+# XNPV / XIRR (TIR con fechas)
+# =========================
+
+def xnpv(rate: float, cashflows: np.ndarray, dates: pd.DatetimeIndex) -> float:
+    """NPV con ACT/365 desde la primera fecha."""
+    if rate <= -1.0:
+        return np.nan
+    dates = pd.to_datetime(dates, errors="coerce")
+    if dates.isna().any():
+        return np.nan
+
+    t0 = dates[0]
+    years = (dates - t0).days / 365.0
+    return float(np.sum(cashflows / (1.0 + rate) ** years))
 
 
-# ----------------------- Multi cotización: PESOS / MEP / CCL -----------------------
+def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low=-0.9999, guess_high=5.0) -> float:
+    """Resuelve XIRR por brentq con expansión de bracket si hace falta."""
+    try:
+        f_low = xnpv(guess_low, cashflows, dates)
+        f_high = xnpv(guess_high, cashflows, dates)
+        if np.isnan(f_low) or np.isnan(f_high):
+            return np.nan
 
-# Tickers base sin sufijo (AL30, GD30, etc.)
-BASE_TICKERS = [
-    "AL29", "AL30", "AE38", "AL35", "AL41",
-    "GD29", "GD30", "GD35", "GD38", "GD41", "GD46",
-]
+        if np.sign(f_low) == np.sign(f_high):
+            for high in [10.0, 20.0, 50.0, 100.0]:
+                f_high = xnpv(high, cashflows, dates)
+                if np.isnan(f_high):
+                    continue
+                if np.sign(f_low) != np.sign(f_high):
+                    guess_high = high
+                    break
 
-# Definición de mercados y sufijos
-MERCADOS = [
-    ("PESOS", ""),   # AL30
-    ("MEP",   "D"),  # AL30D
-    ("CCL",   "C"),  # AL30C
-]
+        if np.sign(f_low) == np.sign(f_high):
+            return np.nan
+
+        return float(brentq(lambda r: xnpv(r, cashflows, dates), guess_low, guess_high, maxiter=200))
+    except Exception:
+        return np.nan
+
+
+# =========================
+# Duration (Macaulay / Modified)
+# =========================
+
+def macaulay_duration_act365(cashflows: np.ndarray, dates_full: pd.DatetimeIndex, y: float) -> float:
+    """
+    Macaulay duration en años (ACT/365).
+    `dates_full` debe incluir valuation_date en el primer elemento, y luego las fechas de cada cashflow.
+    `cashflows` debe ser SOLO los cashflows futuros (sin el flujo t0).
+    """
+    if np.isnan(y) or y <= -1.0:
+        return np.nan
+
+    dates_full = pd.to_datetime(dates_full, errors="coerce")
+    if dates_full.isna().any():
+        return np.nan
+
+    t0 = dates_full[0]
+    times = (dates_full - t0).days / 365.0  # incluye t0 en times[0] = 0
+    if len(times) != (len(cashflows) + 1):
+        return np.nan
+
+    disc = (1.0 + y) ** times
+    pv = cashflows / disc[1:]
+    pv_total = float(np.sum(pv))
+    if pv_total <= 0:
+        return np.nan
+
+    return float(np.sum(times[1:] * pv) / pv_total)
+
+
+def modified_duration_from_macaulay(macaulay: float, y: float) -> float:
+    if np.isnan(macaulay) or np.isnan(y):
+        return np.nan
+    return float(macaulay / (1.0 + y))
+
+
+# =========================
+# Métricas por mercado
+# =========================
+
+def compute_ytm_and_duration(
+    cf: pd.DataFrame,
+    prices_by_ticker: pd.DataFrame,
+    valuation_date: pd.Timestamp,
+) -> pd.DataFrame:
+    """
+    Calcula TIR y Modified Duration por ticker base (sin D/C),
+    usando cashflows en USD y un precio USD por ticker.
+    """
+    df = cf.merge(prices_by_ticker[["Ticker", "PriceUSD"]], on="Ticker", how="left")
+
+    results = []
+    for ticker, g in df.groupby("Ticker", sort=True):
+        px = g["PriceUSD"].dropna().unique()
+        price = float(px[0]) if len(px) else np.nan
+
+        if np.isnan(price):
+            results.append({
+                "Ticker": ticker,
+                "PriceUSD": np.nan,
+                "TIR": np.nan,
+                "Modified_Duration": np.nan,
+                "note": "Sin precio USD",
+            })
+            continue
+
+        future = g[g["Fecha"] > valuation_date].copy().sort_values("Fecha")
+        future = future.dropna(subset=["Fecha", "Cashflow"])
+
+        if future.empty:
+            results.append({
+                "Ticker": ticker,
+                "PriceUSD": price,
+                "TIR": np.nan,
+                "Modified_Duration": np.nan,
+                "note": "Sin cashflows futuros",
+            })
+            continue
+
+        dates_full = pd.to_datetime([valuation_date] + future["Fecha"].tolist(), errors="coerce")
+        cfs_full = np.concatenate((np.array([-price], dtype=float), future["Cashflow"].astype(float).to_numpy()))
+
+        tir = xirr(cfs_full, dates_full)
+
+        if not np.isnan(tir):
+            dur_mac = macaulay_duration_act365(
+                cashflows=future["Cashflow"].astype(float).to_numpy(),
+                dates_full=dates_full,
+                y=tir
+            )
+            dur_mod = modified_duration_from_macaulay(dur_mac, tir)
+        else:
+            dur_mod = np.nan
+
+        results.append({
+            "Ticker": ticker,
+            "PriceUSD": price,
+            "TIR": tir,
+            "Modified_Duration": dur_mod,
+            "note": "" if not np.isnan(tir) else "No converge / revisar cashflows o precio",
+        })
+
+    return pd.DataFrame(results).sort_values("Ticker").reset_index(drop=True)
+
+
+def _build_prices_multi(base_tickers: list[str]) -> pd.DataFrame:
+    tickers_all = []
+    for base in base_tickers:
+        for mercado, suf in MERCADOS:
+            tickers_all.append(f"{base}{suf}")
+
+    prices = fetch_iol_bonds_prices(URL_IOL_BONOS, tickers_all)
+    prices_map = dict(zip(prices["Ticker"], prices["Price"]))
+
+    # --- Fallback a yfinance para tickers faltantes (ej: AN29 / AN29D / AN29C) ---
+    missing = [t for t in tickers_all if (t not in prices_map) or pd.isna(prices_map.get(t))]
+    if missing:
+        yf_prices = fetch_yf_prices(missing)
+        if not yf_prices.empty:
+            prices_map.update(dict(zip(yf_prices["Ticker"], yf_prices["Price"])))
+
+    rows = []
+    for base in base_tickers:
+        price_p = prices_map.get(f"{base}", np.nan)
+        price_d = prices_map.get(f"{base}D", np.nan)
+        price_c = prices_map.get(f"{base}C", np.nan)
+
+        # Precio USD “usable” para TIR: priorizamos D, si no C, si no NaN
+        usd_for_tir = price_d if np.isfinite(price_d) else (price_c if np.isfinite(price_c) else np.nan)
+
+        for mercado, suf in MERCADOS:
+            tk = f"{base}{suf}"
+
+            # Precio a mostrar por mercado (si está disponible)
+            if mercado == "PESOS":
+                shown = price_p if np.isfinite(price_p) else usd_for_tir
+            elif mercado == "MEP":
+                shown = price_d if np.isfinite(price_d) else usd_for_tir
+            else:  # CCL
+                shown = price_c if np.isfinite(price_c) else usd_for_tir
+
+            rows.append({"Base": base, "Ticker": tk, "Mercado": mercado, "PrecioUSD": shown})
+
+    return pd.DataFrame(rows)
+
 
 
 def scrape_bonistas_multi_mercado(
     base_tickers: list[str] | None = None,
     today: date | None = None,
+    bd_path: str = DEFAULT_BD_PATH,
 ) -> pd.DataFrame:
     """
-    Devuelve una tabla con los mismos bonos en 3 mercados:
-    - PESOS  -> ticker base (ej: AL30)
-    - MEP    -> ticker con 'D' final (ej: AL30D)
-    - CCL    -> ticker con 'C' final (ej: AL30C)
+    Compatibilidad con el nombre anterior: ya no scrapea bonistas.
+    Calcula TIR y Duration desde cashflows + precios IOL.
 
     Columnas:
       Base, Ticker, Mercado, Precio, Duration, TIR
     """
     if base_tickers is None:
-        base_tickers = BASE_TICKERS
+        base_tickers = get_base_tickers_from_bd(bd_path)
 
-    rows: list[dict] = []
-    for base in base_tickers:
-        for mercado, sufijo in MERCADOS:
-            tk = f"{base}{sufijo}"
-            try:
-                m = scrape_bonistas_metrics(tk)
-                duration = _duration_years_from_ticker(base, today=today)
-                rows.append({
-                    "Base": base,
-                    "Ticker": tk,
-                    "Mercado": mercado,
-                    "Precio": m["Precio"],
-                    "Duration": duration,
-                    "TIR": m["TIR"],
-                })
-            except Exception as e:
-                print(f"⚠️ Error con {tk}: {e}")
-                rows.append({
-                    "Base": base,
-                    "Ticker": tk,
-                    "Mercado": mercado,
-                    "Precio": None,
-                    "Duration": _duration_years_from_ticker(base, today=today),
-                    "TIR": None,
-                })
 
-    df = pd.DataFrame(rows)
-    df = df.sort_values(["Base", "Mercado"])
-    return df
+    valuation_date = pd.Timestamp(today) if today is not None else pd.Timestamp.today().normalize()
+
+    cf = load_cashflows(bd_path)
+    cf = cf[cf["Ticker"].isin([t.upper() for t in base_tickers])].copy()
+
+    prices_multi = _build_prices_multi([t.upper() for t in base_tickers])
+    # arma tabla de precios USD por ticker base
+    prices_usd = prices_multi[prices_multi["Mercado"] == "MEP"][["Base", "PrecioUSD"]].rename(
+        columns={"Base": "Ticker", "PrecioUSD": "PriceUSD"}
+    )
+    metrics = compute_ytm_and_duration(cf, prices_usd, valuation_date)
+
+    # merge de métricas al multi-mercado
+    out = prices_multi.merge(metrics[["Ticker", "PriceUSD", "TIR", "Modified_Duration"]], left_on="Base", right_on="Ticker", how="left")
+    out = out.drop(columns=["Ticker_y"]).rename(columns={"Ticker_x": "Ticker"})
+    out = out.rename(columns={
+        "PrecioUSD": "Precio",
+        "Modified_Duration": "Duration",
+    })
+
+    out = out[["Base", "Ticker", "Mercado", "Precio", "Duration", "TIR"]].sort_values(["Base", "Mercado"]).reset_index(drop=True)
+    return out
 
 
 def get_multi_table(
     mercado: str | None = None,
     today: date | None = None,
+    bd_path: str = DEFAULT_BD_PATH,
 ) -> pd.DataFrame:
-    """
-    Helper para obtener la tabla multi-cotización.
-    Si `mercado` es:
-      - None   -> devuelve todo
-      - 'PESOS', 'MEP' o 'CCL' -> filtra por ese mercado
-    """
-    df = scrape_bonistas_multi_mercado(BASE_TICKERS, today=today)
+    base_tickers = get_base_tickers_from_bd(bd_path)
+
+    df = scrape_bonistas_multi_mercado(base_tickers, today=today, bd_path=bd_path)
     if mercado is not None:
         mercado = mercado.upper()
         df = df[df["Mercado"] == mercado]
     return df
 
 
-def get_hd_table(today: date | None = None) -> pd.DataFrame:
-    """
-    Devuelve la tabla HD MEP en el formato simple anterior:
-      índice = Ticker
-      columnas = ['Precio', 'Duration', 'TIR']
-    Internamente usa la tabla multi-mercado filtrada por MEP.
-    """
-    df_mep = get_multi_table("MEP", today=today).copy()
+def get_hd_table(today: date | None = None, bd_path: str = DEFAULT_BD_PATH) -> pd.DataFrame:
+    df_mep = get_multi_table("MEP", today=today, bd_path=bd_path).copy()
     df_mep = df_mep.set_index("Ticker")[["Precio", "Duration", "TIR"]]
     return df_mep
-
-
-# ----------------------- Test rápido -----------------------
-
-"""if __name__ == "__main__":
-    print("=== Multi cotización (primeras filas) ===")
-    df_all = get_multi_table()
-    print(df_all.head(), "\n")"""
