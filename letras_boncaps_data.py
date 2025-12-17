@@ -10,6 +10,8 @@ import requests
 from requests.adapters import HTTPAdapter, Retry
 from matplotlib import ticker as mtick
 import plotly.graph_objects as go
+import streamlit as st
+from market_cache import market_bucket, record_data_timestamp
 
 # ===================== 0) Config =====================
 
@@ -371,3 +373,34 @@ def build_letras_bands_figure_plotly(carry: pd.DataFrame) -> go.Figure:
     )
 
     return fig
+
+
+# =========================
+# Cache wrappers (Streamlit Cloud)
+# - Cache bucket changes every 20m between 11:01-18:00 AR
+# - Outside market hours, bucket stays fixed, so no refetch
+# =========================
+def _dcf_cache_bucket() -> str:
+    try:
+        return market_bucket()
+    except Exception:
+        return 'no-bucket'
+
+_dcf_get_letras_carry__impl = get_letras_carry
+@st.cache_data(ttl=60*60*24, show_spinner=False)
+def _dcf_get_letras_carry__cached(bucket: str, *args, **kwargs):
+    return _dcf_get_letras_carry__impl(*args, **kwargs)
+def get_letras_carry(*args, **kwargs):
+    bucket = _dcf_cache_bucket()
+    return _dcf_get_letras_carry__cached(bucket, *args, **kwargs)
+
+"""_dcf_get_boncaps_curve__impl = get_boncaps_curve
+@st.cache_data(ttl=60*60*24, show_spinner=False)
+def _dcf_get_boncaps_curve__cached(bucket: str, *args, **kwargs):
+    return _dcf_get_boncaps_curve__impl(*args, **kwargs)"""
+def get_boncaps_curve(*args, **kwargs):
+    """
+    Alias de compatibilidad: si en algún lugar del código quedó el nombre viejo
+    'get_boncaps_curve', lo redirigimos al flujo actual.
+    """
+    return get_letras_carry(*args, **kwargs)

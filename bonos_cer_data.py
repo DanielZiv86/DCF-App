@@ -314,3 +314,18 @@ def get_bonos_cer(session: Optional[requests.Session] = None) -> Tuple[pd.DataFr
 
     meta = CERMeta(cer_index=None, last_update=None)
     return df, meta
+
+# -----------------------------------------------------------------------------
+# Backwards-compatible aliases (views may import these names)
+# -----------------------------------------------------------------------------
+
+def get_cer_table(*args, **kwargs):
+    """Alias de compatibilidad: devuelve la tabla CER.
+
+    Algunos módulos legacy importan `get_cer_table`; internamente usamos `get_bonos_cer`.
+    """
+    return get_bonos_cer(*args, **kwargs)
+
+
+# Alias adicional por si algún módulo lo referencia directamente
+get_cer_table.__name__ = "get_cer_table"

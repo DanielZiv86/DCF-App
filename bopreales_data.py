@@ -1,5 +1,5 @@
 # bopreales_data.py
-# ========= BOPREAL - Cálculo robusto (sin SciPy / sin webscraping de bonistas) =========
+# ========= BOPREAL - Cálculo robusto (sin SciPy) =========
 #
 # Fuente de precios: IOL (pd.read_html) -> filtra tickers ARS y USD
 # Fuente de cashflows: Excel (BD BOPREALES.xlsx) con flujos en USD
@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Iterable, Callable
+from typing import Iterable, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter, Retry
+import streamlit as st
+
+from market_cache import market_bucket  # tu helper
 
 # =========================
 # Config
@@ -65,11 +68,7 @@ def load_cashflows(path: str = DEFAULT_BD_PATH) -> pd.DataFrame:
 
 def get_base_tickers_from_bd(path: str = DEFAULT_BD_PATH) -> list[str]:
     df = load_cashflows(path)
-    tickers = (
-        df["Ticker"]
-        .astype(str).str.strip().str.upper()
-        .unique().tolist()
-    )
+    tickers = df["Ticker"].astype(str).str.strip().str.upper().unique().tolist()
     return sorted([t for t in tickers if t])
 
 
@@ -134,7 +133,12 @@ def _parse_var_pct(v) -> float:
         return np.nan
 
 
-def fetch_iol_prices_and_var(url: str, tickers: Iterable[str], timeout_s: int = 20, adjust_100x: bool = False) -> pd.DataFrame:
+def fetch_iol_prices_and_var(
+    url: str,
+    tickers: Iterable[str],
+    timeout_s: int = 20,
+    adjust_100x: bool = False,
+) -> pd.DataFrame:
     """
     Devuelve: Ticker, Price, VarPct.
     Robusto a:
@@ -204,6 +208,37 @@ def fetch_iol_prices_and_var(url: str, tickers: Iterable[str], timeout_s: int = 
 
 
 # =========================
+# Root solver (sin SciPy)
+# =========================
+def _bisect_root(f, a: float, b: float, maxiter: int = 200, tol: float = 1e-10) -> float:
+    fa = f(a)
+    fb = f(b)
+    if np.isnan(fa) or np.isnan(fb):
+        return np.nan
+    if fa == 0:
+        return a
+    if fb == 0:
+        return b
+    if np.sign(fa) == np.sign(fb):
+        return np.nan
+
+    lo, hi = a, b
+    flo, fhi = fa, fb
+    for _ in range(maxiter):
+        mid = (lo + hi) / 2.0
+        fmid = f(mid)
+        if np.isnan(fmid):
+            return np.nan
+        if abs(fmid) < tol or (hi - lo) / 2.0 < tol:
+            return mid
+        if np.sign(fmid) == np.sign(flo):
+            lo, flo = mid, fmid
+        else:
+            hi, fhi = mid, fmid
+    return (lo + hi) / 2.0
+
+
+# =========================
 # XNPV / XIRR (TIR con fechas)
 # =========================
 def xnpv(rate: float, cashflows: np.ndarray, dates: pd.DatetimeIndex) -> float:
@@ -217,45 +252,12 @@ def xnpv(rate: float, cashflows: np.ndarray, dates: pd.DatetimeIndex) -> float:
     return float(np.sum(cashflows / (1.0 + rate) ** years))
 
 
-def _bisect_root(
-    f: Callable[[float], float],
-    a: float,
-    b: float,
-    tol: float = 1e-10,
-    maxiter: int = 200,
+def xirr(
+    cashflows: np.ndarray,
+    dates: pd.DatetimeIndex,
+    guess_low: float = -0.9999,
+    guess_high: float = 5.0,
 ) -> float:
-    fa = f(a)
-    fb = f(b)
-    if np.isnan(fa) or np.isnan(fb):
-        return np.nan
-    if fa == 0.0:
-        return float(a)
-    if fb == 0.0:
-        return float(b)
-    if np.sign(fa) == np.sign(fb):
-        return np.nan
-
-    lo, hi = a, b
-    flo, fhi = fa, fb
-
-    for _ in range(maxiter):
-        mid = (lo + hi) / 2.0
-        fmid = f(mid)
-        if np.isnan(fmid):
-            return np.nan
-
-        if abs(fmid) < tol or (hi - lo) / 2.0 < tol:
-            return float(mid)
-
-        if np.sign(flo) == np.sign(fmid):
-            lo, flo = mid, fmid
-        else:
-            hi, fhi = mid, fmid
-
-    return float((lo + hi) / 2.0)
-
-
-def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low: float = -0.9999, guess_high: float = 5.0) -> float:
     try:
         def f(r: float) -> float:
             return xnpv(r, cashflows, dates)
@@ -265,7 +267,6 @@ def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low: float = -0.9
         if np.isnan(f_low) or np.isnan(f_high):
             return np.nan
 
-        # Expandimos el bracket si no hay cambio de signo
         if np.sign(f_low) == np.sign(f_high):
             for high in [10.0, 20.0, 50.0, 100.0]:
                 f_high = f(high)
@@ -278,7 +279,7 @@ def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low: float = -0.9
         if np.sign(f_low) == np.sign(f_high):
             return np.nan
 
-        return _bisect_root(f, guess_low, guess_high, tol=1e-10, maxiter=250)
+        return float(_bisect_root(f, guess_low, guess_high, maxiter=250, tol=1e-10))
     except Exception:
         return np.nan
 
@@ -357,17 +358,16 @@ def _compute_ytm_and_duration_by_base(
 
 
 # =========================
-# Tabla final (ARS / USD) + métricas calculadas
+# Implementación "real" (sin cache)
 # =========================
-def get_multi_table(
+def _get_multi_table_impl(
     bd_path: str = DEFAULT_BD_PATH,
-    today: date | None = None,
+    today: Optional[date] = None,
 ) -> pd.DataFrame:
     """
     Devuelve tabla multi-mercado para BOPREAL:
       Base, Ticker, Mercado, Precio, VarPct, Duration, TIR
 
-    IMPORTANTÍSIMO:
     - TIR y Duration se calculan siempre con:
         cashflows USD (BD) + precio USD (ticker USD asociado)
     - En pestaña ARS se muestra el precio ARS, pero TIR/Duration siguen siendo los mismos
@@ -401,7 +401,6 @@ def get_multi_table(
 
     metrics = _compute_ytm_and_duration_by_base(cf, price_usd_by_base, valuation_date)
 
-    # Tabla final
     rows = []
     for base in base_tickers:
         tk_ars = base
@@ -432,3 +431,16 @@ def get_multi_table(
         })
 
     return pd.DataFrame(rows)
+
+
+# =========================
+# Cache wrapper (Streamlit Cloud)
+# =========================
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def _get_multi_table_cached(bucket: str, bd_path: str, today: Optional[date]) -> pd.DataFrame:
+    # bucket solo sirve para invalidar cada 20 min dentro de horario
+    return _get_multi_table_impl(bd_path=bd_path, today=today)
+
+def get_multi_table(bd_path: str = DEFAULT_BD_PATH, today: Optional[date] = None) -> pd.DataFrame:
+    bucket = market_bucket()
+    return _get_multi_table_cached(bucket, bd_path, today)

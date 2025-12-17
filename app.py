@@ -1,6 +1,9 @@
-import streamlit as st
+#app.py
 
-from app_theme import apply_global_styles, render_header, APP_TITLE
+import streamlit as st
+import market_cache
+
+from app_theme import apply_global_styles, render_header
 from views.bonos_hd import render_bonos_hd
 from views.bopreales import render as render_bopreales
 from views.letras_boncaps import render_letras_boncaps
@@ -10,7 +13,7 @@ from views.ons_ytm import render as render_ons_ytm
 
 # -------------------- Config básica de la app --------------------
 st.set_page_config(
-    page_title=APP_TITLE,
+    page_title="DCF | Herramientas de Análisis de Mercado",
     layout="wide",
 )
 
@@ -20,6 +23,7 @@ render_header()
 
 # -------------------- Sidebar --------------------
 st.sidebar.title("Instrumentos")
+st.sidebar.metric("Última actualización", market_cache.get_last_update_display())
 
 # 1) Selector principal (Bonos tiene misma jerarquía)
 main_view = st.sidebar.radio(
@@ -27,10 +31,10 @@ main_view = st.sidebar.radio(
     options=[
         "Bonos",
         "Letras y Boncaps",
-        "Bonos Ajustable",
+        "Bonos Ajustables CER",
         "ONs",
     ],
-    index=0,  # ✅ default: Bonos
+    index=0,  # default: Bonos
     key="main_view",
 )
 
@@ -47,7 +51,7 @@ if main_view == "Bonos":
             "Bonos Soberanos",
             "Bopreales",
         ],
-        index=0,  # ✅ default: Bonos Soberanos
+        index=0,  # default: Bonos Soberanos
         key="bonos_subview",
         label_visibility="collapsed",
     )
@@ -68,9 +72,8 @@ if main_view == "Bonos":
 elif main_view == "Letras y Boncaps":
     render_letras_boncaps()
 
-elif main_view == "Bonos Ajustable":
+elif main_view == "Bonos Ajustables CER":
     render_bonos_cer()
 
 elif main_view == "ONs":
     render_ons_ytm()
-
