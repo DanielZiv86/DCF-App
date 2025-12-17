@@ -7,28 +7,20 @@
 # Devuelve una tabla multi-mercado compatible con la vista `views/bonos_hd.py`:
 #   Base, Ticker, Mercado, Precio, Duration, TIR
 #
-# Notas:
-# - Para bonos HD, los cashflows suelen estar en USD. Por eso, la TIR se calcula sobre un "precio USD".
-# - MEP: usa el ticker con sufijo 'D' (ej. AL30D)
-# - CCL: usa el ticker con sufijo 'C' (ej. AL30C)
-# - PESOS: para evitar inconsistencias de moneda, se devuelve el mismo precio USD que MEP
-#   (si querés una curva “en pesos”, habría que modelar FX implícito y/o cashflows en ARS).
-#
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from datetime import date
-from typing import Iterable
+from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
 
-# pd.read_html depende de lxml/html5lib; en la mayoría de entornos Streamlit ya está disponible.
-# Si no, instalá: pip install lxml html5lib
 import requests
 from requests.adapters import HTTPAdapter, Retry
-from scipy.optimize import brentq
+
+# yfinance es opcional (fallback)
 try:
     import yfinance as yf
 except Exception:
@@ -39,34 +31,16 @@ except Exception:
 # Config
 # =========================
 
-# ⚠️ Ajustá si tu archivo está en otra ruta
 DEFAULT_BD_PATH = "data/BD BONOS HD.xlsx"
-
-# Tabla pública de IOL con bonos; se parsea con pd.read_html y se filtra por ticker
 URL_IOL_BONOS = "https://iol.invertironline.com/mercado/cotizaciones/argentina/bonos/todos"
-
-def get_base_tickers_from_bd(path: str = DEFAULT_BD_PATH) -> list[str]:
-    """
-    Devuelve la lista de tickers base (SIN sufijos D/C) a partir de la BD.
-    """
-    df = load_cashflows(path)
-    tickers = (
-        df["Ticker"]
-        .astype(str)
-        .str.strip()
-        .str.upper()
-        .unique()
-        .tolist()
-    )
-    tickers = sorted([t for t in tickers if t])  # limpia vacíos
-    return tickers
-
 
 MERCADOS = [
     ("PESOS", ""),   # AL30
     ("MEP", "D"),    # AL30D
     ("CCL", "C"),    # AL30C
 ]
+
+REQUIRED_CF_COLS = ["Ticker", "Fecha", "Principal", "Int", "Cashflow"]
 
 
 # =========================
@@ -88,8 +62,6 @@ def _session() -> requests.Session:
 # =========================
 # Carga de cashflows
 # =========================
-
-REQUIRED_CF_COLS = ["Ticker", "Fecha", "Principal", "Int", "Cashflow"]
 
 def load_cashflows(path: str = DEFAULT_BD_PATH) -> pd.DataFrame:
     """
@@ -113,9 +85,22 @@ def load_cashflows(path: str = DEFAULT_BD_PATH) -> pd.DataFrame:
     for col in ["Principal", "Int", "Cashflow"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-    # limpia filas sin fecha
     df = df.dropna(subset=["Fecha"]).copy()
     return df
+
+
+def get_base_tickers_from_bd(path: str = DEFAULT_BD_PATH) -> list[str]:
+    df = load_cashflows(path)
+    tickers = (
+        df["Ticker"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .unique()
+        .tolist()
+    )
+    tickers = sorted([t for t in tickers if t])
+    return tickers
 
 
 # =========================
@@ -139,7 +124,6 @@ def _parse_price_to_float(x) -> float:
         else:
             s = s.replace(".", "").replace(",", ".")
     else:
-        # Sólo coma: asumimos decimal
         if "," in s and "." not in s:
             s = s.replace(".", "").replace(",", ".")
 
@@ -150,13 +134,6 @@ def _parse_price_to_float(x) -> float:
 
 
 def fetch_iol_bonds_prices(url: str, tickers: Iterable[str], timeout_s: int = 20) -> pd.DataFrame:
-    """
-    Devuelve una tabla con precios por ticker (columna 'Price').
-
-    - Usa pd.read_html sobre la página de IOL.
-    - Intenta detectar columnas de ticker y último/precio.
-    - Normaliza precios y filtra por tickers de interés.
-    """
     s = _session()
     r = s.get(url, timeout=timeout_s)
     r.raise_for_status()
@@ -168,7 +145,6 @@ def fetch_iol_bonds_prices(url: str, tickers: Iterable[str], timeout_s: int = 20
     df = tables[0].copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Heurística de columnas
     ticker_col = next((c for c in df.columns if c.lower() in {"símbolo", "simbolo", "ticker", "especie"}), df.columns[0])
     price_col  = next((c for c in df.columns if c.lower() in {"último", "ultimo", "últ.", "ult.", "precio", "cierre"}), df.columns[1])
 
@@ -180,12 +156,12 @@ def fetch_iol_bonds_prices(url: str, tickers: Iterable[str], timeout_s: int = 20
 
     out["Price"] = out["PriceRaw"].apply(_parse_price_to_float)
 
-    # Muchos precios de bonos vienen en "cents" (ej 3.456 -> 34.56). Regla práctica:
-    # si es muy grande, dividir por 100.
+    # regla práctica: si viene “*100”
     out["Price"] = np.where(out["Price"] > 500, out["Price"] / 100.0, out["Price"])
     out = out.dropna(subset=["Price"]).drop_duplicates(subset=["Ticker"], keep="last")
 
     return out[["Ticker", "Price"]].sort_values("Ticker").reset_index(drop=True)
+
 
 def _to_yf_ticker(tk: str) -> str:
     tk = str(tk).strip().upper()
@@ -193,10 +169,6 @@ def _to_yf_ticker(tk: str) -> str:
 
 
 def fetch_yf_prices(tickers: Iterable[str], period: str = "5d") -> pd.DataFrame:
-    """
-    Devuelve DataFrame: Ticker, Price
-    Usa yfinance. Si no está instalado, devuelve vacío.
-    """
     if yf is None:
         return pd.DataFrame(columns=["Ticker", "Price"])
 
@@ -206,7 +178,6 @@ def fetch_yf_prices(tickers: Iterable[str], period: str = "5d") -> pd.DataFrame:
 
     yf_tickers = [_to_yf_ticker(t) for t in tickers]
 
-    # Descarga conjunta (más eficiente)
     data = yf.download(
         yf_tickers,
         period=period,
@@ -221,7 +192,6 @@ def fetch_yf_prices(tickers: Iterable[str], period: str = "5d") -> pd.DataFrame:
     for base_tk, yf_tk in zip(tickers, yf_tickers):
         try:
             if isinstance(data.columns, pd.MultiIndex):
-                # MultiIndex: (field, ticker) o (ticker, field) depende; probamos ambos
                 if ("Close", yf_tk) in data.columns:
                     close = data[("Close", yf_tk)].dropna()
                 elif (yf_tk, "Close") in data.columns:
@@ -229,27 +199,23 @@ def fetch_yf_prices(tickers: Iterable[str], period: str = "5d") -> pd.DataFrame:
                 else:
                     close = pd.Series(dtype=float)
             else:
-                # Un solo ticker
                 close = data["Close"].dropna() if "Close" in data.columns else pd.Series(dtype=float)
 
             px = float(close.iloc[-1]) if len(close) else np.nan
         except Exception:
             px = np.nan
 
-        # Normalización estilo IOL (bonos a veces vienen “*100”)
         if not np.isnan(px) and px > 500:
             px = px / 100.0
 
         rows.append({"Ticker": base_tk, "Price": px})
 
-    out = pd.DataFrame(rows)
-    out = out.dropna(subset=["Price"])
+    out = pd.DataFrame(rows).dropna(subset=["Price"])
     return out
 
 
-
 # =========================
-# XNPV / XIRR (TIR con fechas)
+# XNPV / XIRR (sin SciPy)
 # =========================
 
 def xnpv(rate: float, cashflows: np.ndarray, dates: pd.DatetimeIndex) -> float:
@@ -265,29 +231,75 @@ def xnpv(rate: float, cashflows: np.ndarray, dates: pd.DatetimeIndex) -> float:
     return float(np.sum(cashflows / (1.0 + rate) ** years))
 
 
-def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low=-0.9999, guess_high=5.0) -> float:
-    """Resuelve XIRR por brentq con expansión de bracket si hace falta."""
+def _find_bracket_for_root(func, low: float, high: float, expansions: list[float]) -> Optional[tuple[float, float]]:
+    """
+    Intenta encontrar un intervalo [a,b] donde func(a) y func(b) tengan signos opuestos.
+    """
     try:
-        f_low = xnpv(guess_low, cashflows, dates)
-        f_high = xnpv(guess_high, cashflows, dates)
+        f_low = func(low)
+        f_high = func(high)
         if np.isnan(f_low) or np.isnan(f_high):
-            return np.nan
+            return None
+        if np.sign(f_low) != np.sign(f_high):
+            return (low, high)
 
-        if np.sign(f_low) == np.sign(f_high):
-            for high in [10.0, 20.0, 50.0, 100.0]:
-                f_high = xnpv(high, cashflows, dates)
-                if np.isnan(f_high):
-                    continue
-                if np.sign(f_low) != np.sign(f_high):
-                    guess_high = high
-                    break
-
-        if np.sign(f_low) == np.sign(f_high):
-            return np.nan
-
-        return float(brentq(lambda r: xnpv(r, cashflows, dates), guess_low, guess_high, maxiter=200))
+        for h in expansions:
+            f_h = func(h)
+            if np.isnan(f_h):
+                continue
+            if np.sign(f_low) != np.sign(f_h):
+                return (low, h)
+        return None
     except Exception:
+        return None
+
+
+def _bisect_root(func, a: float, b: float, tol: float = 1e-9, maxiter: int = 200) -> float:
+    fa = func(a)
+    fb = func(b)
+    if np.isnan(fa) or np.isnan(fb):
         return np.nan
+    if np.sign(fa) == np.sign(fb):
+        return np.nan
+
+    for _ in range(maxiter):
+        m = (a + b) / 2.0
+        fm = func(m)
+        if np.isnan(fm):
+            return np.nan
+
+        if abs(fm) < tol:
+            return float(m)
+
+        # conserva el sub-intervalo con cambio de signo
+        if np.sign(fa) != np.sign(fm):
+            b, fb = m, fm
+        else:
+            a, fa = m, fm
+
+        if abs(b - a) < tol:
+            return float((a + b) / 2.0)
+
+    return float((a + b) / 2.0)
+
+
+def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low: float = -0.9999, guess_high: float = 5.0) -> float:
+    """
+    Resuelve XIRR por bisección (robusto, sin SciPy).
+    """
+    dates = pd.to_datetime(dates, errors="coerce")
+    if dates.isna().any():
+        return np.nan
+
+    def f(r: float) -> float:
+        return xnpv(r, cashflows, dates)
+
+    bracket = _find_bracket_for_root(f, guess_low, guess_high, expansions=[10.0, 20.0, 50.0, 100.0])
+    if bracket is None:
+        return np.nan
+
+    a, b = bracket
+    return _bisect_root(f, a, b, tol=1e-10, maxiter=250)
 
 
 # =========================
@@ -297,8 +309,8 @@ def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low=-0.9999, gues
 def macaulay_duration_act365(cashflows: np.ndarray, dates_full: pd.DatetimeIndex, y: float) -> float:
     """
     Macaulay duration en años (ACT/365).
-    `dates_full` debe incluir valuation_date en el primer elemento, y luego las fechas de cada cashflow.
-    `cashflows` debe ser SOLO los cashflows futuros (sin el flujo t0).
+    `dates_full` incluye valuation_date en el primer elemento, luego fechas de cada cashflow futuro.
+    `cashflows` = cashflows futuros (sin flujo t0).
     """
     if np.isnan(y) or y <= -1.0:
         return np.nan
@@ -308,7 +320,7 @@ def macaulay_duration_act365(cashflows: np.ndarray, dates_full: pd.DatetimeIndex
         return np.nan
 
     t0 = dates_full[0]
-    times = (dates_full - t0).days / 365.0  # incluye t0 en times[0] = 0
+    times = (dates_full - t0).days / 365.0
     if len(times) != (len(cashflows) + 1):
         return np.nan
 
@@ -348,26 +360,14 @@ def compute_ytm_and_duration(
         price = float(px[0]) if len(px) else np.nan
 
         if np.isnan(price):
-            results.append({
-                "Ticker": ticker,
-                "PriceUSD": np.nan,
-                "TIR": np.nan,
-                "Modified_Duration": np.nan,
-                "note": "Sin precio USD",
-            })
+            results.append({"Ticker": ticker, "PriceUSD": np.nan, "TIR": np.nan, "Modified_Duration": np.nan, "note": "Sin precio USD"})
             continue
 
         future = g[g["Fecha"] > valuation_date].copy().sort_values("Fecha")
         future = future.dropna(subset=["Fecha", "Cashflow"])
 
         if future.empty:
-            results.append({
-                "Ticker": ticker,
-                "PriceUSD": price,
-                "TIR": np.nan,
-                "Modified_Duration": np.nan,
-                "note": "Sin cashflows futuros",
-            })
+            results.append({"Ticker": ticker, "PriceUSD": price, "TIR": np.nan, "Modified_Duration": np.nan, "note": "Sin cashflows futuros"})
             continue
 
         dates_full = pd.to_datetime([valuation_date] + future["Fecha"].tolist(), errors="coerce")
@@ -399,13 +399,13 @@ def compute_ytm_and_duration(
 def _build_prices_multi(base_tickers: list[str]) -> pd.DataFrame:
     tickers_all = []
     for base in base_tickers:
-        for mercado, suf in MERCADOS:
+        for _, suf in MERCADOS:
             tickers_all.append(f"{base}{suf}")
 
     prices = fetch_iol_bonds_prices(URL_IOL_BONOS, tickers_all)
     prices_map = dict(zip(prices["Ticker"], prices["Price"]))
 
-    # --- Fallback a yfinance para tickers faltantes (ej: AN29 / AN29D / AN29C) ---
+    # Fallback yfinance para faltantes
     missing = [t for t in tickers_all if (t not in prices_map) or pd.isna(prices_map.get(t))]
     if missing:
         yf_prices = fetch_yf_prices(missing)
@@ -418,24 +418,20 @@ def _build_prices_multi(base_tickers: list[str]) -> pd.DataFrame:
         price_d = prices_map.get(f"{base}D", np.nan)
         price_c = prices_map.get(f"{base}C", np.nan)
 
-        # Precio USD “usable” para TIR: priorizamos D, si no C, si no NaN
         usd_for_tir = price_d if np.isfinite(price_d) else (price_c if np.isfinite(price_c) else np.nan)
 
         for mercado, suf in MERCADOS:
             tk = f"{base}{suf}"
-
-            # Precio a mostrar por mercado (si está disponible)
             if mercado == "PESOS":
                 shown = price_p if np.isfinite(price_p) else usd_for_tir
             elif mercado == "MEP":
                 shown = price_d if np.isfinite(price_d) else usd_for_tir
-            else:  # CCL
+            else:
                 shown = price_c if np.isfinite(price_c) else usd_for_tir
 
             rows.append({"Base": base, "Ticker": tk, "Mercado": mercado, "PrecioUSD": shown})
 
     return pd.DataFrame(rows)
-
 
 
 def scrape_bonistas_multi_mercado(
@@ -453,26 +449,29 @@ def scrape_bonistas_multi_mercado(
     if base_tickers is None:
         base_tickers = get_base_tickers_from_bd(bd_path)
 
-
     valuation_date = pd.Timestamp(today) if today is not None else pd.Timestamp.today().normalize()
 
     cf = load_cashflows(bd_path)
     cf = cf[cf["Ticker"].isin([t.upper() for t in base_tickers])].copy()
 
     prices_multi = _build_prices_multi([t.upper() for t in base_tickers])
-    # arma tabla de precios USD por ticker base
-    prices_usd = prices_multi[prices_multi["Mercado"] == "MEP"][["Base", "PrecioUSD"]].rename(
-        columns={"Base": "Ticker", "PrecioUSD": "PriceUSD"}
+
+    # arma tabla de precio USD por ticker base: priorizamos MEP (D)
+    prices_usd = (
+        prices_multi[prices_multi["Mercado"] == "MEP"][["Base", "PrecioUSD"]]
+        .rename(columns={"Base": "Ticker", "PrecioUSD": "PriceUSD"})
     )
+
     metrics = compute_ytm_and_duration(cf, prices_usd, valuation_date)
 
-    # merge de métricas al multi-mercado
-    out = prices_multi.merge(metrics[["Ticker", "PriceUSD", "TIR", "Modified_Duration"]], left_on="Base", right_on="Ticker", how="left")
+    out = prices_multi.merge(
+        metrics[["Ticker", "PriceUSD", "TIR", "Modified_Duration"]],
+        left_on="Base",
+        right_on="Ticker",
+        how="left",
+    )
     out = out.drop(columns=["Ticker_y"]).rename(columns={"Ticker_x": "Ticker"})
-    out = out.rename(columns={
-        "PrecioUSD": "Precio",
-        "Modified_Duration": "Duration",
-    })
+    out = out.rename(columns={"PrecioUSD": "Precio", "Modified_Duration": "Duration"})
 
     out = out[["Base", "Ticker", "Mercado", "Precio", "Duration", "TIR"]].sort_values(["Base", "Mercado"]).reset_index(drop=True)
     return out
@@ -484,7 +483,6 @@ def get_multi_table(
     bd_path: str = DEFAULT_BD_PATH,
 ) -> pd.DataFrame:
     base_tickers = get_base_tickers_from_bd(bd_path)
-
     df = scrape_bonistas_multi_mercado(base_tickers, today=today, bd_path=bd_path)
     if mercado is not None:
         mercado = mercado.upper()
