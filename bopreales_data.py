@@ -1,5 +1,5 @@
 # bopreales_data.py
-# ========= BOPREAL - Cálculo robusto (sin webscraping de bonistas) =========
+# ========= BOPREAL - Cálculo robusto (sin SciPy / sin webscraping de bonistas) =========
 #
 # Fuente de precios: IOL (pd.read_html) -> filtra tickers ARS y USD
 # Fuente de cashflows: Excel (BD BOPREALES.xlsx) con flujos en USD
@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Iterable
+from typing import Iterable, Callable
 
 import numpy as np
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter, Retry
-from scipy.optimize import brentq
 
 # =========================
 # Config
@@ -136,7 +135,6 @@ def _parse_var_pct(v) -> float:
 
 
 def fetch_iol_prices_and_var(url: str, tickers: Iterable[str], timeout_s: int = 20, adjust_100x: bool = False) -> pd.DataFrame:
-
     """
     Devuelve: Ticker, Price, VarPct.
     Robusto a:
@@ -190,13 +188,11 @@ def fetch_iol_prices_and_var(url: str, tickers: Iterable[str], timeout_s: int = 
 
         tmp["Price"] = tmp["PriceRaw"].apply(_parse_price_to_float)
 
-        # ✅ Fix clave: IOL a veces muestra 102070 en vez de 1020.70 / 102.07
+        # IOL a veces muestra 102070 en vez de 1020.70 / 102.07
         if adjust_100x:
             tmp["Price"] = np.where(tmp["Price"] > 500, tmp["Price"] / 100.0, tmp["Price"])
 
-
         tmp["VarPct"] = tmp["VarRaw"].apply(_parse_var_pct) if "VarRaw" in tmp.columns else np.nan
-
         frames.append(tmp[["Ticker", "Price", "VarPct"]])
 
     if not frames:
@@ -221,16 +217,58 @@ def xnpv(rate: float, cashflows: np.ndarray, dates: pd.DatetimeIndex) -> float:
     return float(np.sum(cashflows / (1.0 + rate) ** years))
 
 
-def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low=-0.9999, guess_high=5.0) -> float:
+def _bisect_root(
+    f: Callable[[float], float],
+    a: float,
+    b: float,
+    tol: float = 1e-10,
+    maxiter: int = 200,
+) -> float:
+    fa = f(a)
+    fb = f(b)
+    if np.isnan(fa) or np.isnan(fb):
+        return np.nan
+    if fa == 0.0:
+        return float(a)
+    if fb == 0.0:
+        return float(b)
+    if np.sign(fa) == np.sign(fb):
+        return np.nan
+
+    lo, hi = a, b
+    flo, fhi = fa, fb
+
+    for _ in range(maxiter):
+        mid = (lo + hi) / 2.0
+        fmid = f(mid)
+        if np.isnan(fmid):
+            return np.nan
+
+        if abs(fmid) < tol or (hi - lo) / 2.0 < tol:
+            return float(mid)
+
+        if np.sign(flo) == np.sign(fmid):
+            lo, flo = mid, fmid
+        else:
+            hi, fhi = mid, fmid
+
+    return float((lo + hi) / 2.0)
+
+
+def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low: float = -0.9999, guess_high: float = 5.0) -> float:
     try:
-        f_low = xnpv(guess_low, cashflows, dates)
-        f_high = xnpv(guess_high, cashflows, dates)
+        def f(r: float) -> float:
+            return xnpv(r, cashflows, dates)
+
+        f_low = f(guess_low)
+        f_high = f(guess_high)
         if np.isnan(f_low) or np.isnan(f_high):
             return np.nan
 
+        # Expandimos el bracket si no hay cambio de signo
         if np.sign(f_low) == np.sign(f_high):
             for high in [10.0, 20.0, 50.0, 100.0]:
-                f_high = xnpv(high, cashflows, dates)
+                f_high = f(high)
                 if np.isnan(f_high):
                     continue
                 if np.sign(f_low) != np.sign(f_high):
@@ -240,7 +278,7 @@ def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low=-0.9999, gues
         if np.sign(f_low) == np.sign(f_high):
             return np.nan
 
-        return float(brentq(lambda r: xnpv(r, cashflows, dates), guess_low, guess_high, maxiter=200))
+        return _bisect_root(f, guess_low, guess_high, tol=1e-10, maxiter=250)
     except Exception:
         return np.nan
 
@@ -347,7 +385,6 @@ def get_multi_table(
 
     prices_ars = fetch_iol_prices_and_var(URL_IOL_BONOS, ars_tks, adjust_100x=False)
     prices_usd = fetch_iol_prices_and_var(URL_IOL_BONOS, usd_tks, adjust_100x=True)
-
 
     ars_map = dict(zip(prices_ars["Ticker"], prices_ars["Price"]))
     ars_var = dict(zip(prices_ars["Ticker"], prices_ars["VarPct"]))
