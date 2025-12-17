@@ -7,3 +7,4 @@ numpy
 plotly
 matplotlib
 openpyxl
+scipy==1.11.4
