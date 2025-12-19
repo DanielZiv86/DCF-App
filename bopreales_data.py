@@ -1,17 +1,24 @@
 # bopreales_data.py
 # ========= BOPREAL - Cálculo robusto (sin SciPy) =========
 #
-# Fuente de precios: IOL (pd.read_html) -> filtra tickers ARS y USD
+# Fuente de precios: IOL (pd.read_html) -> filtra tickers ARS y USD (MEP)
 # Fuente de cashflows: Excel (BD BOPREALES.xlsx) con flujos en USD
 #
 # Devuelve una tabla compatible con una vista tipo bonos:
 #   Base, Ticker, Mercado, Precio, VarPct, Duration, TIR
 #
+# Importante:
+# - Los cashflows están en USD (moneda de emisión), por lo que la TIR se calcula sobre un "precio en USD".
+# - Mercado USD: se usa el precio del ticker USD (ej. BPA7D, BPB8D, etc.).
+# - Mercado ARS: se usa el precio ARS convertido a USD con un FX MEP implícito (proxy):
+#       FX_MEP ≈ AL30 / AL30D  (fallback GD30 / GD30D)
+#       PriceUSD_ARS = Precio_ARS / FX_MEP
+#
 from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
@@ -73,7 +80,7 @@ def get_base_tickers_from_bd(path: str = DEFAULT_BD_PATH) -> list[str]:
 
 
 # =========================
-# Regla nemotécnica tickers USD
+# Regla nemotécnica tickers USD (MEP)
 # =========================
 def bopreal_ars_to_usd_ticker(base_ars: str) -> str:
     """
@@ -144,7 +151,7 @@ def fetch_iol_prices_and_var(
     Robusto a:
     - múltiples tablas en la página (iteramos todas)
     - tickers con '*' u otros caracteres (normaliza a A-Z0-9)
-    - precios en formato 100x (si Price > 500 => /100)
+    - precios en formato 100x (si adjust_100x=True y Price > 500 => /100)
     """
     def _norm_ticker(x: str) -> str:
         x = str(x).strip().upper()
@@ -192,7 +199,6 @@ def fetch_iol_prices_and_var(
 
         tmp["Price"] = tmp["PriceRaw"].apply(_parse_price_to_float)
 
-        # IOL a veces muestra 102070 en vez de 1020.70 / 102.07
         if adjust_100x:
             tmp["Price"] = np.where(tmp["Price"] > 500, tmp["Price"] / 100.0, tmp["Price"])
 
@@ -205,6 +211,27 @@ def fetch_iol_prices_and_var(
     out = pd.concat(frames, ignore_index=True)
     out = out.sort_values("Ticker").drop_duplicates(subset=["Ticker"], keep="last").reset_index(drop=True)
     return out
+
+
+# =========================
+# FX MEP implícito (proxy)
+# =========================
+def _pick_ref_pair(ars_map: dict, usd_map: dict, candidates=("AL30", "GD30")) -> Optional[str]:
+    for ref in candidates:
+        p_ars = ars_map.get(ref, np.nan)
+        p_usd = usd_map.get(f"{ref}D", np.nan)
+        if np.isfinite(p_ars) and np.isfinite(p_usd) and p_usd != 0:
+            return ref
+    return None
+
+
+def _implicit_mep_fx(ars_map: dict, usd_map: dict, ref: str) -> float:
+    # FX (ARS por USD) ≈ ref / refD
+    p_ars = ars_map.get(ref, np.nan)
+    p_usd = usd_map.get(f"{ref}D", np.nan)
+    if not (np.isfinite(p_ars) and np.isfinite(p_usd)) or p_usd == 0:
+        return np.nan
+    return float(p_ars / p_usd)
 
 
 # =========================
@@ -312,7 +339,7 @@ def modified_duration_from_macaulay(macaulay: float, y: float) -> float:
 
 
 # =========================
-# Métricas (siempre usando precio USD)
+# Métricas por base (con PriceUSD ya definido)
 # =========================
 def _compute_ytm_and_duration_by_base(
     cf: pd.DataFrame,
@@ -368,10 +395,9 @@ def _get_multi_table_impl(
     Devuelve tabla multi-mercado para BOPREAL:
       Base, Ticker, Mercado, Precio, VarPct, Duration, TIR
 
-    - TIR y Duration se calculan siempre con:
-        cashflows USD (BD) + precio USD (ticker USD asociado)
-    - En pestaña ARS se muestra el precio ARS, pero TIR/Duration siguen siendo los mismos
-      (porque están “en moneda de emisión” USD).
+    - Cashflows vienen en USD (BD).
+    - Mercado USD: PriceUSD = precio ticker USD (D).
+    - Mercado ARS: PriceUSD = precio ARS / FX_MEP (proxy AL30/AL30D o GD30/GD30D).
     """
     if today is None:
         today = date.today()
@@ -392,23 +418,47 @@ def _get_multi_table_impl(
     usd_map = dict(zip(prices_usd["Ticker"], prices_usd["Price"]))
     usd_var = dict(zip(prices_usd["Ticker"], prices_usd["VarPct"]))
 
-    # PriceUSD para cálculo (por base)
-    price_usd_by_base = []
+    # --- FX MEP implícito (proxy) usando AL30/AL30D o GD30/GD30D ---
+    ref_ars_df = fetch_iol_prices_and_var(URL_IOL_BONOS, ["AL30", "GD30"], adjust_100x=False)
+    ref_usd_df = fetch_iol_prices_and_var(URL_IOL_BONOS, ["AL30D", "GD30D"], adjust_100x=True)
+    ref_ars_map = dict(zip(ref_ars_df["Ticker"], ref_ars_df["Price"]))
+    ref_usd_map = dict(zip(ref_usd_df["Ticker"], ref_usd_df["Price"]))
+
+    ref = _pick_ref_pair(ref_ars_map, ref_usd_map, candidates=("AL30", "GD30"))
+    fx_mep = _implicit_mep_fx(ref_ars_map, ref_usd_map, ref) if ref else np.nan  # ARS por USD
+
+    # PriceUSD por base para ARS y USD
+    price_usd_by_base_ars = []
+    price_usd_by_base_usd = []
     for base in base_tickers:
         tk_usd = bopreal_ars_to_usd_ticker(base)
-        price_usd_by_base.append({"Ticker": base, "PriceUSD": usd_map.get(tk_usd, np.nan)})
-    price_usd_by_base = pd.DataFrame(price_usd_by_base)
 
-    metrics = _compute_ytm_and_duration_by_base(cf, price_usd_by_base, valuation_date)
+        p_ars = ars_map.get(base, np.nan)
+        p_usd = usd_map.get(tk_usd, np.nan)
+
+        p_ars_usd = (p_ars / fx_mep) if (np.isfinite(p_ars) and np.isfinite(fx_mep) and fx_mep != 0) else np.nan
+
+        price_usd_by_base_ars.append({"Ticker": base, "PriceUSD": p_ars_usd})
+        price_usd_by_base_usd.append({"Ticker": base, "PriceUSD": p_usd})
+
+    metrics_ars = _compute_ytm_and_duration_by_base(cf, pd.DataFrame(price_usd_by_base_ars), valuation_date)
+    metrics_ars["Mercado"] = "ARS"
+    metrics_usd = _compute_ytm_and_duration_by_base(cf, pd.DataFrame(price_usd_by_base_usd), valuation_date)
+    metrics_usd["Mercado"] = "USD"
+    metrics_all = pd.concat([metrics_ars, metrics_usd], ignore_index=True)
 
     rows = []
     for base in base_tickers:
         tk_ars = base
         tk_usd = bopreal_ars_to_usd_ticker(base)
 
-        m = metrics[metrics["Ticker"] == base]
-        tir = float(m["TIR"].iloc[0]) if len(m) else np.nan
-        dur = float(m["Modified_Duration"].iloc[0]) if len(m) else np.nan
+        m_ars = metrics_all[(metrics_all["Ticker"] == base) & (metrics_all["Mercado"] == "ARS")]
+        tir_ars = float(m_ars["TIR"].iloc[0]) if len(m_ars) else np.nan
+        dur_ars = float(m_ars["Modified_Duration"].iloc[0]) if len(m_ars) else np.nan
+
+        m_usd = metrics_all[(metrics_all["Ticker"] == base) & (metrics_all["Mercado"] == "USD")]
+        tir_usd = float(m_usd["TIR"].iloc[0]) if len(m_usd) else np.nan
+        dur_usd = float(m_usd["Modified_Duration"].iloc[0]) if len(m_usd) else np.nan
 
         rows.append({
             "Base": base,
@@ -416,8 +466,8 @@ def _get_multi_table_impl(
             "Mercado": "ARS",
             "Precio": ars_map.get(tk_ars, np.nan),
             "VarPct": ars_var.get(tk_ars, np.nan),
-            "Duration": dur,
-            "TIR": tir,
+            "Duration": dur_ars,
+            "TIR": tir_ars,
         })
 
         rows.append({
@@ -426,8 +476,8 @@ def _get_multi_table_impl(
             "Mercado": "USD",
             "Precio": usd_map.get(tk_usd, np.nan),
             "VarPct": usd_var.get(tk_usd, np.nan),
-            "Duration": dur,
-            "TIR": tir,
+            "Duration": dur_usd,
+            "TIR": tir_usd,
         })
 
     return pd.DataFrame(rows)

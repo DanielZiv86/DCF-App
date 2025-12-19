@@ -32,14 +32,15 @@ def _today_at(t: time, dt: datetime) -> datetime:
 
 
 def _prev_trading_day_close(dt: datetime) -> datetime:
-    # Asumimos mercado L-V. Si es sábado/domingo, retrocedemos al viernes.
-    d = dt.date()
+    # Día hábil anterior (L-V). Si cae fin de semana, retrocede hasta viernes.
+    d = dt.date() - timedelta(days=1)
     while True:
         wd = d.weekday()  # 0=Mon ... 6=Sun
         if wd < 5:
             break
         d = d - timedelta(days=1)
     return datetime(d.year, d.month, d.day, MARKET_CLOSE.hour, MARKET_CLOSE.minute, tzinfo=TZ_AR)
+
 
 
 def _next_trading_day_open(dt: datetime) -> datetime:
