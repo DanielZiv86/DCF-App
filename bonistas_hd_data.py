@@ -440,36 +440,68 @@ def _build_prices_multi(base_tickers: list[str]) -> pd.DataFrame:
     prices = fetch_iol_bonds_prices(URL_IOL_BONOS, tickers_all)
     prices_map = dict(zip(prices["Ticker"], prices["Price"]))
 
-    # --- Fallback a yfinance para tickers faltantes (ej: AN29 / AN29D / AN29C) ---
+    # Fallback a yfinance para tickers faltantes
     missing = [t for t in tickers_all if (t not in prices_map) or pd.isna(prices_map.get(t))]
     if missing:
         yf_prices = fetch_yf_prices(missing)
         if not yf_prices.empty:
             prices_map.update(dict(zip(yf_prices["Ticker"], yf_prices["Price"])))
 
+    # FX implícito (proxy Dólar MEP / CCL) usando un bono de referencia disponible
+    ref = _pick_ref_pair(prices_map, candidates=("AL30", "GD30"))
+    fx_mep = _implicit_fx(prices_map, ref, "MEP") if ref else np.nan
+    fx_ccl = _implicit_fx(prices_map, ref, "CCL") if ref else np.nan
+
     rows = []
     for base in base_tickers:
-        price_p = prices_map.get(f"{base}", np.nan)
-        price_d = prices_map.get(f"{base}D", np.nan)
-        price_c = prices_map.get(f"{base}C", np.nan)
+        price_p = prices_map.get(f"{base}", np.nan)    # ARS
+        price_d = prices_map.get(f"{base}D", np.nan)   # USD MEP
+        price_c = prices_map.get(f"{base}C", np.nan)   # USD CCL
 
-        # Precio USD “usable” para TIR: priorizamos D, si no C, si no NaN
-        usd_for_tir = price_d if np.isfinite(price_d) else (price_c if np.isfinite(price_c) else np.nan)
+        # Precio a MOSTRAR por mercado
+        shown_p = price_p
+        shown_d = price_d
+        shown_c = price_c
+
+        # Precio USD a USAR en TIR por mercado (lo que vos pedís)
+        # - PESOS: convierte a USD usando dólar MEP (fx_mep)
+        price_usd_pesos = (price_p / fx_mep) if (np.isfinite(price_p) and np.isfinite(fx_mep) and fx_mep != 0) else np.nan
+        price_usd_mep   = price_d if np.isfinite(price_d) else np.nan
+        price_usd_ccl   = price_c if np.isfinite(price_c) else np.nan
 
         for mercado, suf in MERCADOS:
             tk = f"{base}{suf}"
-
-            # Precio a mostrar por mercado (si está disponible)
             if mercado == "PESOS":
-                shown = price_p if np.isfinite(price_p) else usd_for_tir
+                rows.append({"Base": base, "Ticker": tk, "Mercado": mercado, "Precio": shown_p, "PriceUSD_TIR": price_usd_pesos})
             elif mercado == "MEP":
-                shown = price_d if np.isfinite(price_d) else usd_for_tir
+                rows.append({"Base": base, "Ticker": tk, "Mercado": mercado, "Precio": shown_d, "PriceUSD_TIR": price_usd_mep})
             else:  # CCL
-                shown = price_c if np.isfinite(price_c) else usd_for_tir
-
-            rows.append({"Base": base, "Ticker": tk, "Mercado": mercado, "PrecioUSD": shown})
+                rows.append({"Base": base, "Ticker": tk, "Mercado": mercado, "Precio": shown_c, "PriceUSD_TIR": price_usd_ccl})
 
     return pd.DataFrame(rows)
+
+
+def _pick_ref_pair(prices_map: dict, candidates=("AL30", "GD30")):
+    """Elige un bono de referencia disponible para calcular FX implícito."""
+    for ref in candidates:
+        p = prices_map.get(ref, np.nan)
+        d = prices_map.get(f"{ref}D", np.nan)
+        c = prices_map.get(f"{ref}C", np.nan)
+        if np.isfinite(p) and (np.isfinite(d) or np.isfinite(c)):
+            return ref
+    return None
+
+
+def _implicit_fx(prices_map: dict, ref: str, kind: str) -> float:
+    """
+    kind = 'MEP' -> ref / refD
+    kind = 'CCL' -> ref / refC
+    """
+    p = prices_map.get(ref, np.nan)
+    q = prices_map.get(f"{ref}D" if kind == "MEP" else f"{ref}C", np.nan)
+    if not (np.isfinite(p) and np.isfinite(q)) or q == 0:
+        return np.nan
+    return float(p / q)
 
 
 
@@ -495,22 +527,31 @@ def scrape_bonistas_multi_mercado(
     cf = cf[cf["Ticker"].isin([t.upper() for t in base_tickers])].copy()
 
     prices_multi = _build_prices_multi([t.upper() for t in base_tickers])
-    # arma tabla de precios USD por ticker base
-    prices_usd = prices_multi[prices_multi["Mercado"] == "MEP"][["Base", "PrecioUSD"]].rename(
-        columns={"Base": "Ticker", "PrecioUSD": "PriceUSD"}
-    )
-    metrics = compute_ytm_and_duration(cf, prices_usd, valuation_date)
 
-    # merge de métricas al multi-mercado
-    out = prices_multi.merge(metrics[["Ticker", "PriceUSD", "TIR", "Modified_Duration"]], left_on="Base", right_on="Ticker", how="left")
+    metrics_all = []
+    for mkt in ["PESOS", "MEP", "CCL"]:
+        pu = prices_multi[prices_multi["Mercado"] == mkt][["Base", "PriceUSD_TIR"]].rename(
+            columns={"Base": "Ticker", "PriceUSD_TIR": "PriceUSD"}
+        )
+        met = compute_ytm_and_duration(cf, pu, valuation_date)
+        met["Mercado"] = mkt
+        metrics_all.append(met[["Ticker", "Mercado", "PriceUSD", "TIR", "Modified_Duration"]])
+
+    metrics_all = pd.concat(metrics_all, ignore_index=True)
+
+    out = prices_multi.merge(
+        metrics_all,
+        left_on=["Base", "Mercado"],
+        right_on=["Ticker", "Mercado"],
+        how="left"
+    )
+
     out = out.drop(columns=["Ticker_y"]).rename(columns={"Ticker_x": "Ticker"})
-    out = out.rename(columns={
-        "PrecioUSD": "Precio",
-        "Modified_Duration": "Duration",
-    })
+    out = out.rename(columns={"Modified_Duration": "Duration"})
 
     out = out[["Base", "Ticker", "Mercado", "Precio", "Duration", "TIR"]].sort_values(["Base", "Mercado"]).reset_index(drop=True)
     return out
+
 
 
 def get_multi_table(
