@@ -30,7 +30,7 @@ from market_cache import market_bucket, record_data_timestamp
 # Si no, instalá: pip install lxml html5lib
 import requests
 from requests.adapters import HTTPAdapter, Retry
-from scipy.optimize import brentq
+#from scipy.optimize import brentq
 try:
     import yfinance as yf
 except Exception:
@@ -267,17 +267,50 @@ def xnpv(rate: float, cashflows: np.ndarray, dates: pd.DatetimeIndex) -> float:
     return float(np.sum(cashflows / (1.0 + rate) ** years))
 
 
-def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low=-0.9999, guess_high=5.0) -> float:
-    """Resuelve XIRR por brentq con expansión de bracket si hace falta."""
+def _bisect_root(f, a: float, b: float, tol: float = 1e-8, maxiter: int = 200) -> float:
+    """Root finding por bisección. Requiere cambio de signo entre a y b."""
+    fa = f(a)
+    fb = f(b)
+    if np.isnan(fa) or np.isnan(fb):
+        return np.nan
+    if np.sign(fa) == np.sign(fb):
+        return np.nan
+
+    lo, hi = (a, b) if a < b else (b, a)
+    flo, fhi = (fa, fb) if a < b else (fb, fa)
+
+    for _ in range(maxiter):
+        mid = (lo + hi) / 2.0
+        fmid = f(mid)
+        if np.isnan(fmid):
+            return np.nan
+        if abs(fmid) < tol:
+            return float(mid)
+
+        if np.sign(flo) == np.sign(fmid):
+            lo, flo = mid, fmid
+        else:
+            hi, fhi = mid, fmid
+
+    return float((lo + hi) / 2.0)
+
+
+def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low: float = -0.9999, guess_high: float = 5.0) -> float:
+    """XIRR (TIR con fechas) sin SciPy.
+
+    Usa bisección con expansión del intervalo hasta encontrar cambio de signo.
+    """
     try:
-        f_low = xnpv(guess_low, cashflows, dates)
-        f_high = xnpv(guess_high, cashflows, dates)
+        f = lambda r: xnpv(r, cashflows, dates)
+
+        f_low = f(guess_low)
+        f_high = f(guess_high)
         if np.isnan(f_low) or np.isnan(f_high):
             return np.nan
 
         if np.sign(f_low) == np.sign(f_high):
             for high in [10.0, 20.0, 50.0, 100.0]:
-                f_high = xnpv(high, cashflows, dates)
+                f_high = f(high)
                 if np.isnan(f_high):
                     continue
                 if np.sign(f_low) != np.sign(f_high):
@@ -287,7 +320,7 @@ def xirr(cashflows: np.ndarray, dates: pd.DatetimeIndex, guess_low=-0.9999, gues
         if np.sign(f_low) == np.sign(f_high):
             return np.nan
 
-        return float(brentq(lambda r: xnpv(r, cashflows, dates), guess_low, guess_high, maxiter=200))
+        return _bisect_root(f, guess_low, guess_high, tol=1e-8, maxiter=250)
     except Exception:
         return np.nan
 
