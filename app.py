@@ -81,15 +81,16 @@ if main_view == "Bonos":
     st.sidebar.markdown("<div style='margin-left:12px'>", unsafe_allow_html=True)
 
     bonos_subview = st.sidebar.radio(
-        "",
+        "Subtipo de bonos",
         options=[
             "Bonos Soberanos",
             "Bopreales",
         ],
-        index=0,  # default: Bonos Soberanos
+        index=0,
         key="bonos_subview",
         label_visibility="collapsed",
     )
+
 
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
