@@ -23,8 +23,15 @@ def now_ar() -> datetime:
 
 def is_market_open(dt: datetime | None = None) -> bool:
     dt = dt or now_ar()
-    t = dt.timetz().replace(tzinfo=None)
-    return MARKET_OPEN <= t <= MARKET_CLOSE
+
+    # fin de semana
+    if dt.weekday() >= 5:
+        return False
+
+    open_dt = _today_at(MARKET_OPEN, dt)
+    close_dt = _today_at(MARKET_CLOSE, dt)
+    return open_dt <= dt <= close_dt
+
 
 
 def _today_at(t: time, dt: datetime) -> datetime:

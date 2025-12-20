@@ -12,14 +12,20 @@ from matplotlib import ticker as mtick
 import plotly.graph_objects as go
 import streamlit as st
 from market_cache import market_bucket, record_data_timestamp
+import bandas_cambiarias as bc
 
 # ===================== 0) Config =====================
 
 # Carpeta donde está este archivo .py
 BASE_DIR = Path(__file__).resolve().parent
 
+# Data dir: soporta 'data' al lado del proyecto o un nivel arriba (según tu estructura)
+DATA_DIR = BASE_DIR / "data"
+if not DATA_DIR.exists():
+    DATA_DIR = BASE_DIR.parent / "data"
+
 # Ruta fija al Excel (tal como está en tu disco)
-XLSX_PATH = BASE_DIR / "data" / "Letras Activas.xlsx"
+XLSX_PATH = DATA_DIR / "Letras Activas.xlsx"
 
 # Cache relativa al módulo
 CACHE_DIR = BASE_DIR / ".cache_data912"
@@ -241,24 +247,115 @@ def get_letras_carry(
     carry["tea"] = (ratio_c ** (365 / valid_days) - 1).replace([np.inf, -np.inf], np.nan)
     carry["tem"] = (ratio_c ** (1 / (valid_days / 30)) - 1).replace([np.inf, -np.inf], np.nan)
 
-    # 6) Banda MLC continua (igual que antes)
+    # 6) Bandas cambiarias
+    # ---------------------------------------------------------------------
+    # Fallback (método viejo) por si hay instrumentos con vencimiento < 2026-01
     ANCHOR = date(2025, 4, 11)
     days_since_anchor = (
         (carry["expiration"] - pd.Timestamp(ANCHOR)).dt.days.clip(lower=0)
     )
     months_cont = days_since_anchor / 30.0
 
-    finish_worst_float  = 1400 * (1.01 ** months_cont)  # techo
-    finish_better_float = 1000 * (0.99 ** months_cont)  # piso
+    finish_worst_float_old  = 1400 * (1.01 ** months_cont)  # techo viejo
+    finish_better_float_old = 1000 * (0.99 ** months_cont)  # piso viejo
 
-    carry["finish_worst"]  = finish_worst_float.round().astype("Int64")
-    carry["finish_better"] = finish_better_float.round().astype("Int64")
+    carry["finish_worst"]  = finish_worst_float_old.round().astype("Int64")
+    carry["finish_better"] = finish_better_float_old.round().astype("Int64")
+
+    # ---------------------------------------------------------------------
+    # NUEVO (desde 2026-01): IPC T-2 + REM + tail
+    # Usa Excel local: data/Inflacion mensual.xlsx
+        # ---------------------------------------------------------------------
+    # NUEVO (desde 2026-01): IPC T-2 + REM + tail
+    # Lee Excel local: data/Inflacion mensual.xlsx (Mes, IPC) y data/BD REM.xlsx (Mes, REM)
+    try:
+        # 6.1) Cargar fuentes
+        IPC_XLSX_PATH = DATA_DIR / "Inflacion mensual.xlsx"
+        REM_XLSX_PATH = DATA_DIR / "BD REM.xlsx"
+
+        # Si tus columnas se llaman distinto, ajustá mes_col / ipc_col / rem_col
+        df_ipc = bc.load_ipc_from_excel(
+            IPC_XLSX_PATH,
+            sheet_name=0,
+            mes_col="mes",
+            ipc_col="ipc",
+        )
+
+        df_rem = bc.get_rem_inflacion_mensual_promedio(
+            path=REM_XLSX_PATH,
+            sheet_name=0,
+            mes_col="mes",
+            rem_col="rem",
+        )
+
+        # 6.2) Horizonte dinámico según el vencimiento máximo de Letras/Boncaps
+        df_mats = pd.DataFrame({"vencimiento": carry["expiration"]})
+        end_month = bc.end_month_from_maturities(df_mats, maturity_col="vencimiento")
+
+        internal_start = "2026-01"
+
+        # 6.3) Serie pi (IPC T-2, si falta REM del mes, si falta TAIL)
+        df_pi = bc.build_pi_series_for_bands(
+            start_month=internal_start,
+            end_month=end_month,
+            df_ipc=df_ipc,
+            df_rem=df_rem,
+            tail_floor_pct=1.0,
+            tail_decay_step_pp=0.10,
+            tail_decay_every_n_months=3,
+        )
+
+        # 6.4) Bandas mensuales (piso*(1-pi), techo*(1+pi))
+        # Valores iniciales validados con tu referencia:
+        #   Techo inicial: 1526.60  | Piso inicial: 916.28
+        df_bandas_mensuales = bc.compute_bands_monthly(
+            df_pi=df_pi,
+            piso_inicial=916.28,
+            techo_inicial=1526.60,
+            metodo_piso="multiply",
+        )
+
+        # 6.5) Asignar bandas a cada instrumento por fecha de vencimiento
+        fechas_vto = pd.to_datetime(carry["expiration"]).dt.date
+        mask_new = fechas_vto >= date(2026, 1, 1)
+
+        if mask_new.any():
+            dates_new = pd.to_datetime(carry.loc[mask_new, "expiration"]).dt.date.tolist()
+            unique_dates = sorted(set(dates_new))
+
+            df_bandas_fechas = bc.bandas_for_dates(
+                fechas=unique_dates,
+                df_monthly=df_bandas_mensuales,
+                bandas_res="pro_rata_hab",  # prorratea dentro del mes por días hábiles (Mon–Fri)
+            )
+
+
+            techo_map = dict(zip(df_bandas_fechas["fecha"], df_bandas_fechas["techo"]))
+            piso_map  = dict(zip(df_bandas_fechas["fecha"], df_bandas_fechas["piso"]))
+
+            dates_series = pd.Series(dates_new, index=carry.index[mask_new])
+
+            carry.loc[mask_new, "finish_worst"] = (
+                dates_series.map(techo_map).astype(float).round().astype("Int64")
+            )
+            carry.loc[mask_new, "finish_better"] = (
+                dates_series.map(piso_map).astype(float).round().astype("Int64")
+            )
+
+    except Exception as e:
+        raise RuntimeError(
+            f"No pude calcular bandas nuevas (no se usa fallback viejo). Error: {e}"
+        )
+
+
 
     # 7) Carry en escenarios de tipo de cambio MEP (usando px_c)
     for price in [1000, 1100, 1200, 1300, 1400]:
         carry[f"carry_{price}"] = (carry["payoff"] / px_c) * (mep / price) - 1
 
-    carry["carry_worst"] = (carry["payoff"] / px_c) * (mep / finish_worst_float) - 1
+    finish_worst_fx = pd.to_numeric(carry["finish_worst"], errors="coerce").astype(float)
+    carry["carry_worst"] = (carry["payoff"] / px_c) * (mep / finish_worst_fx) - 1
+
 
     # 8) MEP Breakeven
     carry["MEP_BREAKEVEN"] = (mep * (carry["payoff"] / px_c)).round(0)
