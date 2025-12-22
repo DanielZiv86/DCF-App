@@ -1,5 +1,3 @@
-#app.py
-
 import streamlit as st
 import market_cache
 
@@ -11,24 +9,67 @@ from views.bonos_cer import render_bonos_cer
 from views.ons_ytm import render as render_ons_ytm
 
 
-# -------------------- Config básica de la app --------------------
+# ============================================================
+# LOGIN GOOGLE (GATE DE ACCESO - SIEMPRE ARRIBA DE TODO)
+# ============================================================
+import os
+import streamlit as st
+
+def login_gate():
+    """
+    Login SOLO en Streamlit Cloud.
+    En local no bloquea (para desarrollo).
+    """
+
+    # Streamlit Cloud setea esta variable de entorno
+    is_cloud = bool(os.getenv("STREAMLIT_CLOUD"))
+
+    if not is_cloud:
+        # Local: no exigir login
+        return
+
+    # Cloud: exigir login (pero solo si la feature existe)
+    if not hasattr(st, "login") or not hasattr(st, "user") or not hasattr(st.user, "is_logged_in"):
+        st.error("Auth no disponible en este entorno. Verificá streamlit>=1.42.0 en requirements.txt.")
+        st.stop()
+
+    if not st.user.is_logged_in:
+        st.set_page_config(page_title="DCF | Acceso a clientes", layout="centered")
+        st.title("DCF Inversiones — Acceso a clientes")
+        st.write("Ingresá con tu cuenta de Google para continuar.")
+        st.button("Ingresar con Google", on_click=st.login)
+        st.stop()
+
+login_gate()
+
+
+
+# ============================================================
+# CONFIG BÁSICA DE LA APP (solo si está logueado)
+# ============================================================
 st.set_page_config(
     page_title="DCF | Herramientas de Análisis de Mercado",
     layout="wide",
 )
 
-# -------------------- Estilos globales + Header --------------------
+
+# ============================================================
+# ESTILOS + HEADER
+# ============================================================
 apply_global_styles()
-# -------------------- Ajustes UI (sidebar) --------------------
+render_header()
+
+
+# ============================================================
+# AJUSTES UI (sidebar)
+# ============================================================
 st.markdown(
     """
     <style>
-      /* Sidebar: achicar KPI 'Última actualización' */
       section[data-testid="stSidebar"] [data-testid="stMetricLabel"] { font-size: 0.85rem; }
       section[data-testid="stSidebar"] [data-testid="stMetricValue"] { font-size: 1.35rem; }
       section[data-testid="stSidebar"] [data-testid="stMetricDelta"] { font-size: 0.75rem; }
 
-      /* Badge pill */
       .dcf-badge {
         display: inline-block;
         padding: 0.15rem 0.55rem;
@@ -44,13 +85,19 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-render_header()
 
-# -------------------- Sidebar --------------------
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+email = (st.user.get("email") or "").strip().lower()
+
+st.sidebar.success(f"Sesión iniciada: {email}")
+st.sidebar.button("Cerrar sesión", on_click=st.logout)
+
 st.sidebar.title("Instrumentos")
 st.sidebar.metric("Última actualización", market_cache.get_last_update_display())
 
-# Badge Mercado abierto/cerrado (según horario definido en market_cache)
 is_open = market_cache.is_market_open()
 badge_text = "Mercado abierto" if is_open else "Mercado cerrado"
 badge_class = "dcf-open" if is_open else "dcf-closed"
@@ -60,7 +107,9 @@ st.sidebar.markdown(
 )
 
 
-# 1) Selector principal (Bonos tiene misma jerarquía)
+# ============================================================
+# NAVEGACIÓN
+# ============================================================
 main_view = st.sidebar.radio(
     "Seleccioná el instrumento",
     options=[
@@ -69,11 +118,10 @@ main_view = st.sidebar.radio(
         "Bonos Ajustables CER",
         "ONs",
     ],
-    index=0,  # default: Bonos
+    index=0,
     key="main_view",
 )
 
-# 2) Sub-vistas SOLO cuando main_view == "Bonos"
 bonos_subview = st.session_state.get("bonos_subview", "Bonos Soberanos")
 
 if main_view == "Bonos":
@@ -91,14 +139,15 @@ if main_view == "Bonos":
         label_visibility="collapsed",
     )
 
-
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Herramienta interna • DCF Inversiones")
 
 
-# -------------------- Lógica principal --------------------
+# ============================================================
+# LÓGICA PRINCIPAL
+# ============================================================
 if main_view == "Bonos":
     if bonos_subview == "Bonos Soberanos":
         render_bonos_hd()

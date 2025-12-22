@@ -28,3 +28,4 @@ desktop.ini
 # Datos locales (opcional)
 data/*.tmp
 *.log
+DCF_APP_WHITELIST.gsheet
