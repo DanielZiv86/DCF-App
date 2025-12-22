@@ -17,20 +17,17 @@ import streamlit as st
 
 def login_gate():
     """
-    Login SOLO en Streamlit Cloud.
-    En local no bloquea (para desarrollo).
+    Login SOLO cuando hay auth configurado en Secrets (Cloud).
+    En local (sin secrets) no bloquea.
     """
-
-    # Streamlit Cloud setea esta variable de entorno
-    is_cloud = bool(os.getenv("STREAMLIT_CLOUD"))
-
-    if not is_cloud:
-        # Local: no exigir login
+    auth_cfg = st.secrets.get("auth", None)
+    if not auth_cfg:
+        # Local / sin secrets -> no exigir login
         return
 
-    # Cloud: exigir login (pero solo si la feature existe)
+    # Auth configurado -> exigir login
     if not hasattr(st, "login") or not hasattr(st, "user") or not hasattr(st.user, "is_logged_in"):
-        st.error("Auth no disponible en este entorno. Verificá streamlit>=1.42.0 en requirements.txt.")
+        st.error("Auth configurado pero Streamlit no soporta login. Requiere streamlit>=1.42.0.")
         st.stop()
 
     if not st.user.is_logged_in:
