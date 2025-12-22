@@ -1,6 +1,8 @@
+import os
+import pandas as pd
 import streamlit as st
-import market_cache
 
+import market_cache
 from app_theme import apply_global_styles, render_header
 from views.bonos_hd import render_bonos_hd
 from views.bopreales import render as render_bopreales
@@ -10,44 +12,143 @@ from views.ons_ytm import render as render_ons_ytm
 
 
 # ============================================================
-# LOGIN GOOGLE (GATE DE ACCESO - SIEMPRE ARRIBA DE TODO)
-# ============================================================
-import os
-import streamlit as st
-
-def login_gate():
-    """
-    Login SOLO cuando hay auth configurado en Secrets (Cloud).
-    En local (sin secrets) no bloquea.
-    """
-    auth_cfg = st.secrets.get("auth", None)
-    if not auth_cfg:
-        # Local / sin secrets -> no exigir login
-        return
-
-    # Auth configurado -> exigir login
-    if not hasattr(st, "login") or not hasattr(st, "user") or not hasattr(st.user, "is_logged_in"):
-        st.error("Auth configurado pero Streamlit no soporta login. Requiere streamlit>=1.42.0.")
-        st.stop()
-
-    if not st.user.is_logged_in:
-        st.set_page_config(page_title="DCF | Acceso a clientes", layout="centered")
-        st.title("DCF Inversiones — Acceso a clientes")
-        st.write("Ingresá con tu cuenta de Google para continuar.")
-        st.button("Ingresar con Google", on_click=st.login)
-        st.stop()
-
-login_gate()
-
-
-
-# ============================================================
-# CONFIG BÁSICA DE LA APP (solo si está logueado)
+# CONFIG (DEBE IR PRIMERO)
 # ============================================================
 st.set_page_config(
     page_title="DCF | Herramientas de Análisis de Mercado",
     layout="wide",
 )
+
+
+# ============================================================
+# HELPERS: secrets + user
+# ============================================================
+def _get_secrets_dict() -> dict:
+    """
+    En local sin secrets.toml, st.secrets levanta StreamlitSecretNotFoundError.
+    Acá devolvemos {} para que no rompa.
+    """
+    try:
+        return st.secrets.to_dict()
+    except Exception:
+        return {}
+
+
+def _get_user_email() -> str | None:
+    """
+    Streamlit puede exponer email como atributo o como dict-like.
+    """
+    try:
+        email = getattr(st.user, "email", None)
+        if email:
+            return str(email).strip().lower()
+    except Exception:
+        pass
+
+    try:
+        if hasattr(st, "user") and hasattr(st.user, "get"):
+            email = st.user.get("email")
+            if email:
+                return str(email).strip().lower()
+    except Exception:
+        pass
+
+    return None
+
+
+# ============================================================
+# LOGIN + WHITELIST (SOLO WEB CUANDO HAY [auth] EN SECRETS)
+# ============================================================
+def login_gate(secrets: dict):
+    """
+    Si no hay [auth] en secrets => LOCAL / sin auth => NO bloquea.
+    Si hay [auth] => exige login con Google (Streamlit Cloud).
+    """
+    auth_cfg = secrets.get("auth")
+    if not auth_cfg:
+        return  # local / sin secrets => no login
+
+    # Auth configurado -> exigir login
+    if not hasattr(st, "login") or not hasattr(st, "user") or not hasattr(st.user, "is_logged_in"):
+        st.error("Auth configurado pero esta versión/entorno no soporta login. Requiere streamlit>=1.42.0.")
+        st.stop()
+
+    if not st.user.is_logged_in:
+        st.title("DCF Inversiones — Acceso a clientes")
+        st.write("Ingresá con tu cuenta de Google para continuar.")
+        st.button("Ingresar con Google", on_click=st.login, type="primary")
+        st.stop()
+
+
+@st.cache_data(ttl=60)
+def load_whitelist_df(sheet_id: str, gid: str) -> pd.DataFrame:
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    return pd.read_csv(url)
+
+
+def enforce_whitelist(secrets: dict):
+    """
+    Solo corre si existe [auth] (o sea, en Cloud).
+    """
+    auth_cfg = secrets.get("auth")
+    if not auth_cfg:
+        return  # local / sin auth => no whitelist
+
+    email = _get_user_email()
+    if not email:
+        st.error("No se pudo obtener el email desde Google.")
+        st.stop()
+
+    # Requiere whitelist en secrets
+    wl = secrets.get("whitelist", {})
+    sheet_id = wl.get("sheet_id")
+    gid = wl.get("gid")
+    if not sheet_id or gid is None:
+        st.error("Falta configurar whitelist en Secrets: whitelist.sheet_id y whitelist.gid")
+        st.stop()
+
+    df = load_whitelist_df(str(sheet_id), str(gid))
+
+    if "email" not in df.columns or "active" not in df.columns:
+        st.error(
+            "El Google Sheet debe tener columnas 'email' y 'active'. "
+            f"Columnas encontradas: {list(df.columns)}"
+        )
+        st.stop()
+
+    # Normalización
+    df["email"] = df["email"].astype(str).str.strip().str.lower()
+    df["active"] = (
+        df["active"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin(["true", "1", "yes", "y", "si", "sí"])
+    )
+
+    row = df.loc[df["email"] == email]
+    allowed = (not row.empty) and bool(row.iloc[0]["active"])
+
+    if not allowed:
+        st.title("Acceso restringido")
+        st.write(f"Tu cuenta **{email}** no está habilitada para acceder.")
+        st.write("Si sos cliente de DCF, pedinos acceso y lo habilitamos.")
+        if hasattr(st, "logout"):
+            st.button("Cerrar sesión", on_click=st.logout)
+        st.stop()
+
+    # Rol (opcional)
+    role = "user"
+    if "role" in df.columns and not row.empty:
+        role = str(row.iloc[0].get("role", "user")).strip().lower() or "user"
+
+    st.session_state["role"] = role
+
+
+# Ejecutar gates antes del resto de la app
+_secrets = _get_secrets_dict()
+login_gate(_secrets)
+enforce_whitelist(_secrets)
 
 
 # ============================================================
@@ -87,10 +188,11 @@ st.markdown(
 # ============================================================
 # SIDEBAR
 # ============================================================
-email = (st.user.get("email") or "").strip().lower()
+email = _get_user_email() or ""
 
-st.sidebar.success(f"Sesión iniciada: {email}")
-st.sidebar.button("Cerrar sesión", on_click=st.logout)
+if email and hasattr(st, "logout"):
+    st.sidebar.success(f"Sesión iniciada: {email}")
+    st.sidebar.button("Cerrar sesión", on_click=st.logout)
 
 st.sidebar.title("Instrumentos")
 st.sidebar.metric("Última actualización", market_cache.get_last_update_display())
