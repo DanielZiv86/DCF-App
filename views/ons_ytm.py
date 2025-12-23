@@ -295,9 +295,11 @@ def render():
         st.subheader("Filtros ONs")
 
         # Legislación (desde meta)
-        leg_opts = sorted(
-            [x for x in meta["legislacion"].dropna().unique().tolist() if str(x).strip() != ""]
-        ) if not meta.empty else []
+        leg_opts = (
+            sorted([x for x in meta["legislacion"].dropna().unique().tolist() if str(x).strip() != ""])
+            if (meta is not None and not meta.empty and "legislacion" in meta.columns)
+            else []
+        )
         sel_legs = st.multiselect(
             "Legislación",
             options=leg_opts,
@@ -308,7 +310,7 @@ def render():
         # Lámina mínima (discreto, desde meta)
         lam_opts = (
             meta["lamina_minima"].dropna().astype(int).unique().tolist()
-            if (not meta.empty and "lamina_minima" in meta.columns)
+            if (meta is not None and not meta.empty and "lamina_minima" in meta.columns)
             else []
         )
         lam_opts = sorted(lam_opts)
@@ -334,11 +336,11 @@ def render():
         )
 
     # 3) Computo final (depende de toggles)
-    df_raw = _compute(df_bd, use_t_plus_1, last_cf_close_days)
+    df_raw = _compute(df_bd, use_t_plus_1, int(last_cf_close_days))
     df = df_raw[df_raw["status"].astype(str).str.startswith("OK")].copy()
 
     # Merge meta (legislacion + lamina_minima)
-    if not meta.empty and "ticker" in df.columns:
+    if meta is not None and not meta.empty and "ticker" in df.columns:
         df = df.merge(meta, on="ticker", how="left")
     else:
         df["legislacion"] = "—"
@@ -359,15 +361,61 @@ def render():
     else:
         df_f = df_f.iloc[0:0].copy()
 
+    # =========================
+    # KPIs + Insight (arriba)
+    # =========================
+    st.subheader("Resumen")
+
+    if df_f.empty:
+        st.info("No hay resultados para los filtros seleccionados.")
+    else:
+        tir = pd.to_numeric(df_f.get("ytm_pct"), errors="coerce")
+        maturity = pd.to_datetime(df_f.get("last_cf_date"), errors="coerce")
+        today = pd.Timestamp.today().normalize()
+
+        tir_mean = float(tir.mean()) if tir.notna().any() else np.nan
+        tir_p75 = float(tir.quantile(0.75)) if tir.notna().any() else np.nan
+
+        years_to_mat = ((maturity - today).dt.days / 365.25) if maturity.notna().any() else pd.Series(dtype=float)
+        years_mean = float(years_to_mat.mean()) if years_to_mat.notna().any() else np.nan
+
+        mep_med = (
+            float(pd.to_numeric(df_f.get("mep_venta"), errors="coerce").median())
+            if "mep_venta" in df_f.columns
+            else np.nan
+        )
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("ONs filtradas", f"{len(df_f):,}".replace(",", "."))
+        k2.metric("TIR promedio", fmt_pct(tir_mean) if np.isfinite(tir_mean) else "—")
+        k3.metric("TIR p75", fmt_pct(tir_p75) if np.isfinite(tir_p75) else "—", help="Percentil 75 de TIR (top 25% por retorno).")
+        k4.metric("Maturity promedio", f"{fmt_num(years_mean, 2)} años" if np.isfinite(years_mean) else "—")
+        k5.metric("MEP Venta (IOL)", fmt_num(mep_med, 2) if np.isfinite(mep_med) else "—", help="Referencia para convertir ARS a USD (equivalente MEP).")
+
+        # Insight simple por legislación (si hay datos de ambos grupos)
+        df_tmp = df_f.copy()
+        df_tmp["_leg_norm"] = df_tmp["legislacion"].apply(_normalize_leg)
+        tir_by = df_tmp.groupby("_leg_norm")["ytm_pct"].mean(numeric_only=True) if "ytm_pct" in df_tmp.columns else pd.Series(dtype=float)
+
+        if ("NY" in tir_by.index) and ("Arg" in tir_by.index) and np.isfinite(tir_by.get("NY")) and np.isfinite(tir_by.get("Arg")):
+            delta_bps = (float(tir_by["NY"]) - float(tir_by["Arg"])) * 100.0  # 1% = 100 bps
+            better = "NY" if delta_bps > 0 else "Arg"
+            st.info(
+                f"📌 **Insight:** con los filtros actuales, las ONs bajo **ley {better}** rinden en promedio "
+                f"**{abs(delta_bps):,.0f} bps** {'más' if delta_bps > 0 else 'menos'} que las de la otra legislación."
+                .replace(",", ".")
+            )
+        else:
+            st.caption("Tip: usá el filtro de Legislación para comparar comportamiento por marco legal.")
+
     # Layout como Letras: [1.2, 2.0]
     left, right = st.columns([1.2, 2.0])
 
-    # Alturas simétricas
     CHART_H = 550
     TABLE_H = CHART_H
 
     # =========================
-    # Tabla (izquierda)
+    # Tabla + Buckets (izquierda)
     # =========================
     with left:
         st.subheader("Tabla")
@@ -375,49 +423,159 @@ def render():
         if df_f.empty:
             st.info("No hay resultados para los filtros seleccionados.")
         else:
-            base = df_f[[
-                "ticker",
-                "price_dirty_ars",
-                "price_dirty_usd_mkt",
-                "tasa_cupon_pct",
-                "ytm_pct",
-                "legislacion",
-                "lamina_minima",
-                "status",
-            ]].copy()
+            df_table = df_f.copy()
 
-            base = base.rename(columns={
-                "ticker": "Ticker",
-                "price_dirty_ars": "Precio ARS",
-                "price_dirty_usd_mkt": "Precio USD",
-                "tasa_cupon_pct": "Cupón",
-                "ytm_pct": "TIR",
-                "legislacion": "Legislación",
-                "lamina_minima": "Lámina mínima",
-                "status": "_status",
-            })
+            # Asegurar tipos
+            df_table["ytm_pct"] = pd.to_numeric(df_table.get("ytm_pct"), errors="coerce")
+            df_table["tasa_cupon_pct"] = pd.to_numeric(df_table.get("tasa_cupon_pct"), errors="coerce")
+            df_table["price_dirty_ars"] = pd.to_numeric(df_table.get("price_dirty_ars"), errors="coerce")
+            df_table["price_dirty_usd_mkt"] = pd.to_numeric(df_table.get("price_dirty_usd_mkt"), errors="coerce")
+            df_table["lamina_minima"] = pd.to_numeric(df_table.get("lamina_minima"), errors="coerce").astype("Int64")
+            df_table["last_cf_date"] = pd.to_datetime(df_table.get("last_cf_date"), errors="coerce")
 
-            base["Precio ARS"] = base["Precio ARS"].apply(fmt_ars)
-            base["Precio USD"] = base["Precio USD"].apply(fmt_usd)
-            base["Cupón"] = base["Cupón"].apply(fmt_pct)
-            base["TIR"] = base["TIR"].apply(fmt_pct)
+            df_table = df_table.sort_values("ytm_pct", ascending=False, na_position="last")
 
-            base["Lámina mínima"] = pd.to_numeric(base["Lámina mínima"], errors="coerce")
-            base["Lámina mínima"] = base["Lámina mínima"].map(lambda v: "-" if pd.isna(v) else f"{int(v)}")
+            # =========================
+            # Alertas visuales + Buckets
+            # =========================
+            today = pd.Timestamp.today().normalize()
+            mat_dt = df_table["last_cf_date"]
+            years_to_mat = (mat_dt - today).dt.days / 365.25
 
-            # Orden sugerido (TIR desc)
-            try:
-                base["_tir_num"] = pd.to_numeric(df_f["ytm_pct"], errors="coerce")
-                base = base.sort_values("_tir_num", ascending=False).drop(columns=["_tir_num"])
-            except Exception:
-                pass
+            tir_num = df_table["ytm_pct"]
+            lam_num = pd.to_numeric(df_table["lamina_minima"], errors="coerce")
 
-            show = base[["Ticker", "Precio ARS", "Precio USD", "Cupón", "TIR", "Legislación", "Lámina mínima"]].copy()
+            is_arg = df_table["legislacion"].apply(lambda x: _normalize_leg(x) == "Arg")
+            is_short = years_to_mat.notna() & (years_to_mat <= 1.5)
+
+            # ⭐ Lámina mínima = 1
+            is_lam_one = lam_num.notna() & (lam_num == 1)
+
+            # Baja lámina (para bucket): por defecto <= 100 VN
+            is_low_lam = lam_num.notna() & (lam_num <= 100)
+
+            near_mat = mat_dt.notna() & ((mat_dt - today).dt.days <= int(last_cf_close_days))
+
+            top3_idx = (
+                df_table["ytm_pct"]
+                .dropna()
+                .nlargest(3)
+                .index
+            )
+
+            is_top3_tir = df_table.index.isin(top3_idx)
+
+
+            def _alert_row(_is_arg: bool, _near: bool, _lam_one: bool, _top3: bool) -> str:
+                marks = []
+                if _near:
+                    marks.append("⚠️")
+                if _lam_one:
+                    marks.append("⭐")
+                if _top3:
+                    marks.append("🎯")
+                if _is_arg:
+                    marks.append("🇦🇷")
+                return " ".join(marks)
+
+            df_table["⚑"] = [
+                _alert_row(a, n, l1, t3)
+                for a, n, l1, t3 in zip(
+                    is_arg.tolist(),
+                    near_mat.tolist(),
+                    is_lam_one.tolist(),
+                    is_top3_tir.tolist(),
+                )
+            ]
+
+
+            # Buckets
+            top_tir = df_table.loc[tir_num.notna()].nlargest(5, "ytm_pct").copy()
+            low_lamina = df_table.loc[is_low_lam].sort_values("ytm_pct", ascending=False, na_position="last").head(5).copy()
+            corto_plazo = df_table.loc[is_short].sort_values("ytm_pct", ascending=False, na_position="last").head(5).copy()
+            ley_arg = df_table.loc[is_arg].sort_values("ytm_pct", ascending=False, na_position="last").head(5).copy()
+
+            with st.expander("Rankings rápidos (buckets)", expanded=False):
+                t1, t2, t3, t4 = st.tabs(["Top TIR", "Baja lámina", "Corto plazo", "Ley Arg"])
+
+                def _bucket_table(dd: pd.DataFrame):
+                    if dd.empty:
+                        st.caption("Sin resultados con los filtros actuales.")
+                        return
+                    tmp = dd[["ticker", "ytm_pct", "price_dirty_usd_mkt", "lamina_minima", "legislacion"]].rename(
+                        columns={
+                            "ticker": "Ticker",
+                            "ytm_pct": "TIR (%)",
+                            "price_dirty_usd_mkt": "USD (D)",
+                            "lamina_minima": "Lámina",
+                            "legislacion": "Ley",
+                        }
+                    )
+                    st.dataframe(
+                        tmp,
+                        width="stretch",
+                        height=220,
+                        hide_index=True,
+                        column_config={
+                            "Ticker": st.column_config.TextColumn(),
+                            "TIR (%)": st.column_config.NumberColumn(format="%.2f"),
+                            "USD (D)": st.column_config.NumberColumn(format="USD %.2f"),
+                            "Lámina": st.column_config.NumberColumn(format="%d"),
+                            "Ley": st.column_config.TextColumn(),
+                        },
+                    )
+
+                with t1:
+                    _bucket_table(top_tir)
+                with t2:
+                    _bucket_table(low_lamina)
+                with t3:
+                    _bucket_table(corto_plazo)
+                with t4:
+                    _bucket_table(ley_arg)
+
+            # Tabla principal
+            show = df_table[
+                [
+                    "⚑",
+                    "ticker",
+                    "price_dirty_ars",
+                    "price_dirty_usd_mkt",
+                    "tasa_cupon_pct",
+                    "ytm_pct",
+                    "legislacion",
+                    "lamina_minima",
+                ]
+            ].rename(
+                columns={
+                    "⚑": "",
+                    "ticker": "Ticker",
+                    "price_dirty_ars": "Precio ARS",
+                    "price_dirty_usd_mkt": "Precio USD (D)",
+                    "tasa_cupon_pct": "Cupón (%)",
+                    "ytm_pct": "TIR (%)",
+                    "legislacion": "Legislación",
+                    "lamina_minima": "Lámina mínima (VN)",
+                }
+            )
 
             st.dataframe(
-                show.set_index("Ticker"),
+                show,
                 width="stretch",
                 height=TABLE_H,
+                hide_index=True,
+                column_config={
+                    "": st.column_config.TextColumn(help="Alertas: ⚠️ vencimiento cercano | ⭐ lámina mínima = 1 | 🎯 Top 3 TIR | 🇦🇷 ley Arg"),
+                    "Ticker": st.column_config.TextColumn(help="Símbolo de la ON."),
+                    "Precio ARS": st.column_config.NumberColumn(format="$ %.0f"),
+                    "Precio USD (D)": st.column_config.NumberColumn(format="USD %.2f", help="Precio de la especie D (si existe en IOL)."),
+                    "Cupón (%)": st.column_config.NumberColumn(format="%.2f"),
+                    "TIR (%)": st.column_config.NumberColumn(format="%.2f", help="TIR anualizada en USD al precio actual."),
+                    "Legislación": st.column_config.TextColumn(
+                        help="La legislación define qué normas regulan la emisión y qué tribunales intervienen en caso de disputa."
+                    ),
+                    "Lámina mínima (VN)": st.column_config.NumberColumn(format="%d", help="Cantidad de VN mínimos a comprar."),
+                },
             )
 
     # =========================
@@ -432,10 +590,18 @@ def render():
         else:
             plot_df["last_cf_date"] = pd.to_datetime(plot_df["last_cf_date"])
 
-            # Color: legislación Arg vs resto (naranja para Arg)
             plot_df["leg_color_group"] = plot_df["legislacion"].apply(
                 lambda x: "Ley Arg" if _normalize_leg(x) == "Arg" else "Ley NY"
             )
+
+            lam = pd.to_numeric(plot_df.get("lamina_minima"), errors="coerce").fillna(1).astype(float)
+            plot_df["lamina_size_log"] = np.log10(lam.clip(lower=1.0)) + 1.0
+
+            plot_df["TIR (%)"] = pd.to_numeric(plot_df.get("ytm_pct"), errors="coerce")
+            plot_df["Cupón (%)"] = pd.to_numeric(plot_df.get("tasa_cupon_pct"), errors="coerce")
+            plot_df["Precio ARS"] = pd.to_numeric(plot_df.get("price_dirty_ars"), errors="coerce")
+            plot_df["Precio USD (D)"] = pd.to_numeric(plot_df.get("price_dirty_usd_mkt"), errors="coerce")
+            plot_df["Lámina mínima (VN)"] = pd.to_numeric(plot_df.get("lamina_minima"), errors="coerce")
 
             fig = px.scatter(
                 plot_df,
@@ -443,17 +609,31 @@ def render():
                 y="ytm_pct",
                 text="ticker",
                 color="leg_color_group",
+                size="lamina_size_log",
+                size_max=18,
                 color_discrete_map={
-                    "Ley NY": "#9ecae1",     # celeste
-                    "Ley Arg": "#f28e2b",  # naranja
+                    "Ley NY": "#9ecae1",
+                    "Ley Arg": "#f28e2b",
                 },
-                hover_data=["ticker", "ytm_pct", "price_dirty_ars", "tasa_cupon_pct", "legislacion", "lamina_minima"],
+                hover_name="ticker",
+                hover_data={
+                    "TIR (%)": True,
+                    "Cupón (%)": True,
+                    "Precio ARS": True,
+                    "Precio USD (D)": True,
+                    "Lámina mínima (VN)": True,
+                    "leg_color_group": False,
+                    "ytm_pct": False,
+                    "tasa_cupon_pct": False,
+                    "price_dirty_ars": False,
+                    "price_dirty_usd_mkt": False,
+                    "lamina_minima": False,
+                    "lamina_size_log": False,
+                },
                 category_orders={"leg_color_group": ["Ley NY", "Ley Arg"]},
             )
-
             fig.update_layout(legend_title_text="")
 
-            # Tendencia grado 2 (>=3 puntos) sobre TODOS los puntos filtrados
             if len(plot_df) >= 3:
                 x_sorted = plot_df.sort_values("last_cf_date")
                 x_num = x_sorted["last_cf_date"].astype("int64") / 1e9
@@ -477,6 +657,7 @@ def render():
             fig.update_layout(
                 xaxis_title="Maturity",
                 yaxis_title="TIR (%)",
+                yaxis_tickformat=".2f",
                 height=CHART_H,
                 margin=dict(l=10, r=10, t=10, b=10),
                 template=DCF_PLOTLY_TEMPLATE,
