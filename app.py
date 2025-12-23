@@ -16,6 +16,12 @@ warnings.filterwarnings(
     message="The behavior of DatetimeProperties.to_pydatetime is deprecated*",
     category=FutureWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    message="When grouping with a length-1 list-like*",
+    category=FutureWarning,
+)
+
 
 
 # ============================================================

@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter, Retry
+from io import StringIO
 import streamlit as st
 
 from market_cache import market_bucket  # tu helper
@@ -165,7 +166,7 @@ def fetch_iol_prices_and_var(
     r = s.get(url, timeout=timeout_s)
     r.raise_for_status()
 
-    tables = pd.read_html(r.text)
+    tables = pd.read_html(StringIO(r.text))
     if not tables:
         return pd.DataFrame(columns=["Ticker", "Price", "VarPct"])
 
@@ -494,3 +495,4 @@ def _get_multi_table_cached(bucket: str, bd_path: str, today: Optional[date]) ->
 def get_multi_table(bd_path: str = DEFAULT_BD_PATH, today: Optional[date] = None) -> pd.DataFrame:
     bucket = market_bucket()
     return _get_multi_table_cached(bucket, bd_path, today)
+
