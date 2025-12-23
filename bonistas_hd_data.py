@@ -30,6 +30,7 @@ from market_cache import market_bucket, record_data_timestamp
 # Si no, instalá: pip install lxml html5lib
 import requests
 from requests.adapters import HTTPAdapter, Retry
+from io import StringIO
 #from scipy.optimize import brentq
 try:
     import yfinance as yf
@@ -163,7 +164,7 @@ def fetch_iol_bonds_prices(url: str, tickers: Iterable[str], timeout_s: int = 20
     r = s.get(url, timeout=timeout_s)
     r.raise_for_status()
 
-    tables = pd.read_html(r.text)
+    tables = pd.read_html(StringIO(r.text))
     if not tables:
         raise RuntimeError("No pude leer tablas con pd.read_html desde IOL.")
 
@@ -551,6 +552,55 @@ def scrape_bonistas_multi_mercado(
 
     out = out[["Base", "Ticker", "Mercado", "Precio", "Duration", "TIR"]].sort_values(["Base", "Mercado"]).reset_index(drop=True)
     return out
+
+
+
+def get_multi_table(
+    mercado: str | None = None,
+    today: date | None = None,
+    bd_path: str = DEFAULT_BD_PATH,
+) -> pd.DataFrame:
+    base_tickers = get_base_tickers_from_bd(bd_path)
+
+    df = scrape_bonistas_multi_mercado(base_tickers, today=today, bd_path=bd_path)
+    if mercado is not None:
+        mercado = mercado.upper()
+        df = df[df["Mercado"] == mercado]
+    return df
+
+
+def get_hd_table(today: date | None = None, bd_path: str = DEFAULT_BD_PATH) -> pd.DataFrame:
+    df_mep = get_multi_table("MEP", today=today, bd_path=bd_path).copy()
+    df_mep = df_mep.set_index("Ticker")[["Precio", "Duration", "TIR"]]
+    return df_mep
+
+
+# =========================
+# Cache wrappers (Streamlit Cloud)
+# - Cache bucket changes every 20m between 11:01-18:00 AR
+# - Outside market hours, bucket stays fixed, so no refetch
+# =========================
+def _dcf_cache_bucket() -> str:
+    try:
+        return market_bucket()
+    except Exception:
+        return 'no-bucket'
+
+_dcf_get_hd_table__impl = get_hd_table
+@st.cache_data(ttl=60*60*24, show_spinner=False)
+def _dcf_get_hd_table__cached(bucket: str, *args, **kwargs):
+    return _dcf_get_hd_table__impl(*args, **kwargs)
+def get_hd_table(*args, **kwargs):
+    bucket = _dcf_cache_bucket()
+    return _dcf_get_hd_table__cached(bucket, *args, **kwargs)
+
+_dcf_get_multi_table__impl = get_multi_table
+@st.cache_data(ttl=60*60*24, show_spinner=False)
+def _dcf_get_multi_table__cached(bucket: str, *args, **kwargs):
+    return _dcf_get_multi_table__impl(*args, **kwargs)
+def get_multi_table(*args, **kwargs):
+    bucket = _dcf_cache_bucket()
+    return _dcf_get_multi_table__cached(bucket, *args, **kwargs)
 
 
 

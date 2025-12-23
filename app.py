@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import streamlit as st
+import warnings
 
 import market_cache
 from app_theme import apply_global_styles, render_header
@@ -9,6 +10,12 @@ from views.bopreales import render as render_bopreales
 from views.letras_boncaps import render_letras_boncaps
 from views.bonos_cer import render_bonos_cer
 from views.ons_ytm import render as render_ons_ytm
+
+warnings.filterwarnings(
+    "ignore",
+    message="The behavior of DatetimeProperties.to_pydatetime is deprecated*",
+    category=FutureWarning,
+)
 
 
 # ============================================================

@@ -112,7 +112,7 @@ def render():
 
                 st.dataframe(
                     show,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "Ticker": st.column_config.TextColumn(width="small"),
@@ -122,4 +122,4 @@ def render():
                 )
 
             with col_fig:
-                st.plotly_chart(build_curve_figure(df), use_container_width=True)
+                st.plotly_chart(build_curve_figure(df), width="stretch")

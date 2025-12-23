@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import requests
 
+from io import StringIO
 # =========================
 # Config
 # =========================
@@ -33,7 +34,7 @@ def _parse_number_ar(s: str) -> float:
 def get_mep_venta_iol() -> float:
     """MEP Venta tomado de 'Dólar MEP - Ley Local (AL30D) *'."""
     html = requests.get(URL_MONEDAS, headers=HEADERS, timeout=25).text
-    df = pd.read_html(html)[0].copy()
+    df = pd.read_html(StringIO(html))[0].copy()
     df.columns = [str(c).strip() for c in df.columns]
 
     df["Moneda_norm"] = (
@@ -135,7 +136,7 @@ def get_prices_iol_ons(tickers_ars: List[str]) -> pd.DataFrame:
       daily_change_ars, daily_change_usd
     """
     html = requests.get(URL_ONS, headers=HEADERS, timeout=25).text
-    iol = pd.read_html(html)[0].copy()
+    iol = pd.read_html(StringIO(html))[0].copy()
 
     iol = iol[["Símbolo", "Último Operado", "Variación Diaria"]].rename(columns={
         "Símbolo": "ticker",
@@ -305,6 +306,9 @@ def compute_ytm_table(
     rows = []
     for _, r in base.iterrows():
         tkr = r["ticker"]
+        # Defaults to avoid UnboundLocalError in any early-return branch
+        status = "UNKNOWN"
+        ytm = np.nan
 
         flows_all = _get_flows(df_bd, tkr)
         next_dt, last_dt = _flow_dates_info(flows_all, settle)
@@ -325,12 +329,12 @@ def compute_ytm_table(
                 status += " | " + ",".join(alerts)
             rows.append({
                 "ticker": tkr,
-                "price_dirty_ars": float(r["price_dirty_ars"]),
+                "price_dirty_ars": (float(r["price_dirty_ars"]) if not pd.isna(r.get("price_dirty_ars")) else np.nan),
                 "price_dirty_usd_mkt": r.get("price_dirty_usd_mkt"),
                 "price_dirty_usd_used": float(r.get("price_dirty_usd_used")) if not pd.isna(r.get("price_dirty_usd_used")) else np.nan,
                 "mep_venta": float(r.get("mep_venta")) if not pd.isna(r.get("mep_venta")) else np.nan,
                 "tasa_cupon_pct": r.get("tasa_cupon_pct"),
-                "ytm_pct": round(ytm * 100, 2),
+                "ytm_pct": (round(float(ytm) * 100, 2) if np.isfinite(ytm) else np.nan),
                 "next_cf_date": next_dt,
                 "last_cf_date": last_dt,
                 "status": status,
@@ -348,12 +352,12 @@ def compute_ytm_table(
                 status += " | " + ",".join(alerts)
             rows.append({
                 "ticker": tkr,
-                "price_dirty_ars": float(r["price_dirty_ars"]),
+                "price_dirty_ars": (float(r["price_dirty_ars"]) if not pd.isna(r.get("price_dirty_ars")) else np.nan),
                 "price_dirty_usd_mkt": r.get("price_dirty_usd_mkt"),
                 "price_dirty_usd_used": float(r.get("price_dirty_usd_used")) if not pd.isna(r.get("price_dirty_usd_used")) else np.nan,
                 "mep_venta": float(r.get("mep_venta")) if not pd.isna(r.get("mep_venta")) else np.nan,
                 "tasa_cupon_pct": r.get("tasa_cupon_pct"),
-                "ytm_pct": round(ytm * 100, 2),
+                "ytm_pct": (round(float(ytm) * 100, 2) if np.isfinite(ytm) else np.nan),
                 "next_cf_date": next_dt,
                 "last_cf_date": last_dt,
                 "status": status,
@@ -366,12 +370,12 @@ def compute_ytm_table(
                 status += " | " + ",".join(alerts)
             rows.append({
                 "ticker": tkr,
-                "price_dirty_ars": float(r["price_dirty_ars"]),
+                "price_dirty_ars": (float(r["price_dirty_ars"]) if not pd.isna(r.get("price_dirty_ars")) else np.nan),
                 "price_dirty_usd_mkt": r.get("price_dirty_usd_mkt"),
                 "price_dirty_usd_used": float(r.get("price_dirty_usd_used")) if not pd.isna(r.get("price_dirty_usd_used")) else np.nan,
                 "mep_venta": float(r.get("mep_venta")) if not pd.isna(r.get("mep_venta")) else np.nan,
                 "tasa_cupon_pct": r.get("tasa_cupon_pct"),
-                "ytm_pct": round(ytm * 100, 2),
+                "ytm_pct": (round(float(ytm) * 100, 2) if np.isfinite(ytm) else np.nan),
                 "next_cf_date": next_dt,
                 "last_cf_date": last_dt,
                 "status": status,
@@ -385,12 +389,12 @@ def compute_ytm_table(
                 status += " | " + ",".join(alerts)
             rows.append({
                 "ticker": tkr,
-                "price_dirty_ars": float(r["price_dirty_ars"]),
+                "price_dirty_ars": (float(r["price_dirty_ars"]) if not pd.isna(r.get("price_dirty_ars")) else np.nan),
                 "price_dirty_usd_mkt": r.get("price_dirty_usd_mkt"),
                 "price_dirty_usd_used": float(r.get("price_dirty_usd_used")) if not pd.isna(r.get("price_dirty_usd_used")) else np.nan,
                 "mep_venta": float(r.get("mep_venta")) if not pd.isna(r.get("mep_venta")) else np.nan,
                 "tasa_cupon_pct": r.get("tasa_cupon_pct"),
-                "ytm_pct": round(ytm * 100, 2),
+                "ytm_pct": (round(float(ytm) * 100, 2) if np.isfinite(ytm) else np.nan),
                 "next_cf_date": next_dt,
                 "last_cf_date": last_dt,
                 "status": status,
@@ -401,12 +405,12 @@ def compute_ytm_table(
                 status += " | " + ",".join(alerts)
             rows.append({
                 "ticker": tkr,
-                "price_dirty_ars": float(r["price_dirty_ars"]),
+                "price_dirty_ars": (float(r["price_dirty_ars"]) if not pd.isna(r.get("price_dirty_ars")) else np.nan),
                 "price_dirty_usd_mkt": r.get("price_dirty_usd_mkt"),
                 "price_dirty_usd_used": float(r.get("price_dirty_usd_used")) if not pd.isna(r.get("price_dirty_usd_used")) else np.nan,
                 "mep_venta": float(r.get("mep_venta")) if not pd.isna(r.get("mep_venta")) else np.nan,
                 "tasa_cupon_pct": r.get("tasa_cupon_pct"),
-                "ytm_pct": round(ytm * 100, 2),
+                "ytm_pct": (round(float(ytm) * 100, 2) if np.isfinite(ytm) else np.nan),
                 "next_cf_date": next_dt,
                 "last_cf_date": last_dt,
                 "status": status,

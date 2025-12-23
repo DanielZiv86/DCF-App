@@ -181,7 +181,7 @@ def render_bonos_cer():
 
         st.dataframe(
             df_disp.set_index("Ticker"),
-            use_container_width=True,
+            width="stretch",
             height=table_height,
         )
 
@@ -189,5 +189,5 @@ def render_bonos_cer():
     with graf_col:
         st.subheader("Curva CER: TIR real vs vencimiento")
         fig = build_cer_tir_curve(df)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 

@@ -9,6 +9,7 @@ from typing import Optional, Tuple, List, Dict
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter, Retry
+from io import StringIO
 
 # =========================================
 # Config
@@ -115,6 +116,10 @@ def load_bonos_prices_and_expirations() -> pd.DataFrame:
     # (Opcional, pero recomendable) limitar a los bonos CER
     df = df[df["Ticker"].isin(CER_TICKERS)]
 
+    # Evitar tickers duplicados en la hoja (p.ej. múltiples filas por mercado).
+    # Nos quedamos con la última aparición del ticker (orden de la hoja).
+    df = df.drop_duplicates(subset=["Ticker"], keep="last")
+
     return df.set_index("Ticker")
 
 
@@ -203,7 +208,7 @@ def _scrape_bonistas_ticker(ticker: str, session: requests.Session) -> Optional[
     html = resp.text
 
     try:
-        tables = pd.read_html(html)
+        tables = pd.read_html(StringIO(html))
     except ValueError:
         print(f"[WARN] pd.read_html no encontró tablas para {ticker} en Bonistas.")
         return None

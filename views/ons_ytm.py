@@ -264,7 +264,7 @@ def render_ticker_detail(
         template=DCF_PLOTLY_TEMPLATE,
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 # =========================
@@ -416,7 +416,7 @@ def render():
 
             st.dataframe(
                 show.set_index("Ticker"),
-                use_container_width=True,
+                width="stretch",
                 height=TABLE_H,
             )
 
@@ -483,7 +483,7 @@ def render():
                 legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center"),
             )
 
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     # =========================
     # Detalle por ticker (ancho completo, debajo)

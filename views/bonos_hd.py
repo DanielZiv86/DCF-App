@@ -128,7 +128,7 @@ def render_bonos_hd():
 
             st.dataframe(
                 df_show.set_index("Ticker"),
-                use_container_width=True,
+                width="stretch",
                 height=table_height,
             )
 
@@ -136,6 +136,6 @@ def render_bonos_hd():
         st.markdown("### Curva de TIR en moneda de emisión")
         if not df_market.empty:
             fig = build_curve_figure(df_market[["Ticker", "Duration", "TIR"]], mercado)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         else:
             st.info("Sin datos para graficar la curva.")

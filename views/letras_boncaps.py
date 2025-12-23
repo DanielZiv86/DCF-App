@@ -300,10 +300,9 @@ def render_letras_boncaps():
 
         st.dataframe(
             df_show.set_index("Ticker"),
-            use_container_width=True,
+            width="stretch",
             height=table_height,
         )
-
     # ---------- Gráficos ----------
     with graf_col:
         st.markdown("### Análisis gráfico")
@@ -314,17 +313,17 @@ def render_letras_boncaps():
 
         with tab_tna:
             fig_tna = build_letras_rate_curve(carry_raw, "tna", "TNA")
-            st.plotly_chart(fig_tna, use_container_width=True)
+            st.plotly_chart(fig_tna, width="stretch")
 
         with tab_tem:
             fig_tem = build_letras_rate_curve(carry_raw, "tem", "TEM")
-            st.plotly_chart(fig_tem, use_container_width=True)
+            st.plotly_chart(fig_tem, width="stretch")
 
         with tab_carry:
             fig_carry = build_letras_bands_figure_plotly(carry_raw)
-            st.plotly_chart(fig_carry, use_container_width=True)
+            st.plotly_chart(fig_carry, width="stretch")
 
         with tab_esc:
             st.markdown("#### Escenarios de Carry-Trade por tipo de cambio MEP")
             fig_heat = build_letras_scenarios_heatmap(carry_raw)
-            st.plotly_chart(fig_heat, use_container_width=True)
+            st.plotly_chart(fig_heat, width="stretch")
