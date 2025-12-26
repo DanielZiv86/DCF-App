@@ -11,6 +11,8 @@ from views.letras_boncaps import render_letras_boncaps
 from views.bonos_cer import render_bonos_cer
 from views.ons_ytm import render as render_ons_ytm
 from views.bonos_general import render as render_bonos_general
+from views.tabla_sensibilidad import render as render_tabla_sensibilidad
+
 
 
 warnings.filterwarnings(
@@ -247,8 +249,10 @@ if main_view == "Bonos":
         options=[
             "Bonos Soberanos",
             "Bopreales",
+            "Tabla de Sensibilidad",
             "Gráfico General",
         ],
+
         index=0,
         key="bonos_subview",
         label_visibility="collapsed",
@@ -268,6 +272,8 @@ if main_view == "Bonos":
         render_bonos_hd()
     elif bonos_subview == "Bopreales":
         render_bopreales()
+    elif bonos_subview == "Tabla de Sensibilidad":
+        render_tabla_sensibilidad()
     elif bonos_subview == "Gráfico General":
         render_bonos_general()
 
