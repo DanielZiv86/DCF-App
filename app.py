@@ -10,6 +10,8 @@ from views.bopreales import render as render_bopreales
 from views.letras_boncaps import render_letras_boncaps
 from views.bonos_cer import render_bonos_cer
 from views.ons_ytm import render as render_ons_ytm
+from views.bonos_general import render as render_bonos_general
+
 
 warnings.filterwarnings(
     "ignore",
@@ -245,6 +247,7 @@ if main_view == "Bonos":
         options=[
             "Bonos Soberanos",
             "Bopreales",
+            "Gráfico General",
         ],
         index=0,
         key="bonos_subview",
@@ -265,6 +268,8 @@ if main_view == "Bonos":
         render_bonos_hd()
     elif bonos_subview == "Bopreales":
         render_bopreales()
+    elif bonos_subview == "Gráfico General":
+        render_bonos_general()
 
 elif main_view == "Letras y Boncaps":
     render_letras_boncaps()
